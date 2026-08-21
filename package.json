@@ -1,0 +1,47 @@
+{
+  "name": "transaction-import-reconciliation-service",
+  "version": "1.0.0",
+  "description": "High-Throughput Transaction Import and Reconciliation Service in Node.js & TypeScript",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:generate": "NODE_OPTIONS=\"--import tsx\" drizzle-kit generate",
+    "db:migrate": "tsx src/infrastructure/db/migrate.ts",
+    "db:studio": "NODE_OPTIONS=\"--import tsx\" drizzle-kit studio",
+    "generate:data": "tsx scripts/generate-data.ts",
+    "benchmark": "tsx scripts/run-benchmark.ts",
+    "test": "vitest run --dir tests/unit",
+    "test:integration": "vitest run --dir tests/integration",
+    "test:all": "vitest run"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.4",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "nanoid": "^5.0.9",
+    "p-limit": "^6.2.0",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.7",
+    "@types/pg": "^8.11.10",
+    "@types/supertest": "^6.0.2",
+    "drizzle-kit": "^0.30.2",
+    "esbuild": "^0.28.2",
+    "supertest": "^7.0.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.3"
+  }
+}
