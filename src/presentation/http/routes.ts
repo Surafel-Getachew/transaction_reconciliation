@@ -1,6 +1,28 @@
 import { Router } from "express";
+import multer from "multer";
 import path from "node:path";
 import { ImportController } from "./controllers/import.controller.js";
+
+const upload = multer({
+  dest: process.env.TEMP_UPLOAD_DIR || "./uploads",
+  limits: {
+    fileSize: parseInt(process.env.MAX_FILE_SIZE_BYTES || "524288000", 10), // 500MB
+  },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    if (ext === ".ndjson") {
+      cb(null, true);
+    } else {
+      const err: any = new Error(
+        "Invalid file type. Only NDJSON files are supported.",
+      );
+      err.statusCode = 400;
+      err.code = "INVALID_FILE_TYPE";
+      cb(err);
+    }
+  },
+});
 
 export function createRouter(controller: ImportController): Router {
   const router = Router();
@@ -9,5 +31,7 @@ export function createRouter(controller: ImportController): Router {
   router.get("/health/live", controller.getLiveness);
   router.get("/health/ready", controller.getReadiness);
 
+  // Import API
+  router.post("/v1/imports", upload.single("file"), controller.createImport);
   return router;
 }
