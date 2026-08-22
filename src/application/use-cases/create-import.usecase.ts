@@ -2,7 +2,9 @@ import { nanoid } from "nanoid";
 import { Readable } from "node:stream";
 import { IImportRepository } from "../../domain/repositories/import-repository.interface.js";
 import { IFileStorage } from "../../domain/storage/file-storage.interface.js";
+import { ImportProcessor } from "../processor/import-processor.js";
 import { ImportRecord } from "../../infrastructure/db/schema/imports.js";
+import { IImportJobQueue } from "../queue/import-job-queue.js";
 
 export interface CreateImportDTO {
   idempotencyKey?: string;
@@ -14,7 +16,10 @@ export class CreateImportUseCase {
   constructor(
     private importRepo: IImportRepository,
     private fileStorage: IFileStorage,
+    private importProcessor: ImportProcessor,
+    private jobQueue?: IImportJobQueue,
   ) {}
+
   async execute(
     dto: CreateImportDTO,
   ): Promise<{ importRecord: ImportRecord; isDuplicate: boolean }> {
@@ -34,7 +39,13 @@ export class CreateImportUseCase {
       return { importRecord: existing, isDuplicate: true };
     }
 
-    // TOOD: JOB QUEUE
+    const reservation = this.jobQueue?.reserve();
+    if (this.jobQueue && !reservation) {
+      const err: any = new Error("Import processing queue is at capacity");
+      err.statusCode = 429;
+      err.code = "IMPORT_QUEUE_FULL";
+      throw err;
+    }
 
     try {
       const importId = nanoid();
@@ -42,6 +53,7 @@ export class CreateImportUseCase {
         importId,
         dto.fileStream,
       );
+
       const { importRecord, isDuplicate } =
         await this.importRepo.createWithIdempotency(
           {
@@ -55,15 +67,29 @@ export class CreateImportUseCase {
           },
           key,
         );
+
       if (isDuplicate) {
         await this.fileStorage.deleteFile(filePath);
-        // TODO: release reservation here JOB QUEUE
+        reservation?.release();
         return { importRecord, isDuplicate: true };
       }
-      // // TODO: check reservation
+
+      if (reservation) {
+        reservation.enqueue({ importId, filePath, providerId });
+      } else {
+        setImmediate(
+          () =>
+            void this.importProcessor.processImport(
+              importId,
+              filePath,
+              providerId,
+            ),
+        );
+      }
+
       return { importRecord, isDuplicate: false };
     } catch (error) {
-      // TODO: release reservation JOB QUEUE
+      reservation?.release();
       throw error;
     }
   }

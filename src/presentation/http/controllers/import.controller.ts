@@ -28,6 +28,7 @@ export class ImportController {
       const providerId =
         (req.headers["x-provider-id"] as string) ||
         (req.query.providerId as string);
+
       if (!idempotencyKey) {
         return res.status(400).json({
           error: {
@@ -46,6 +47,7 @@ export class ImportController {
           },
         });
       }
+
       const fileStream: Readable = req.file.path
         ? fs.createReadStream(req.file.path)
         : Readable.from(req.file.buffer);

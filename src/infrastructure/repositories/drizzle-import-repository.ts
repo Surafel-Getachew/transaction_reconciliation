@@ -76,4 +76,48 @@ export class DrizzleImportRepository implements IImportRepository {
 
     return res[0]?.import || null;
   }
+  async updateProgress(
+    id: string,
+    deltas: {
+      processed: number;
+      accepted: number;
+      rejected: number;
+      duplicates: number;
+    },
+  ): Promise<void> {
+    await this.db
+      .update(imports)
+      .set({
+        processedCount: sql`${imports.processedCount} + ${deltas.processed}`,
+        acceptedCount: sql`${imports.acceptedCount} + ${deltas.accepted}`,
+        rejectedCount: sql`${imports.rejectedCount} + ${deltas.rejected}`,
+        duplicateCount: sql`${imports.duplicateCount} + ${deltas.duplicates}`,
+      })
+      .where(eq(imports.id, id));
+  }
+
+  async markStarted(id: string): Promise<void> {
+    await this.db
+      .update(imports)
+      .set({
+        status: "processing",
+        startedAt: new Date(),
+      })
+      .where(eq(imports.id, id));
+  }
+
+  async markCompleted(
+    id: string,
+    status: "completed" | "failed" | "cancelled",
+    failureReason?: string | null,
+  ): Promise<void> {
+    await this.db
+      .update(imports)
+      .set({
+        status,
+        completedAt: new Date(),
+        failureReason: failureReason ?? null,
+      })
+      .where(eq(imports.id, id));
+  }
 }
