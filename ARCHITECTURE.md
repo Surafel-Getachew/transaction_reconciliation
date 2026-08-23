@@ -1,0 +1,91 @@
+# Architecture Documentation
+
+Comprehensive architectural design for the **High-Throughput Transaction Import and Reconciliation Service**.
+
+## System Architecture Diagram
+
+```mermaid
+flowchart TD
+    Client[HTTP Client / API User] -->|POST /v1/imports<br/>Idempotency-Key| Router[Express Router & Controllers]
+    Router -->|1. Check/Persist Key| IdemDB[(PostgreSQL: idempotency_keys)]
+    Router -->|2. Save Stream| TempStorage[Local Temp File Storage]
+    Router -->|3. Return 202 Accepted| Client
+    
+    Router -.->|4. Trigger Async Job| Processor[Import Processor Stream Reader]
+    
+    subgraph Processing Pipeline
+        Processor -->|Stream line-by-line| Parser[NDJSON Parser & Validator]
+        Parser -->|Validation Failures| RejectionBatch[Rejection Batch Queue]
+        Parser -->|Valid Records| Normalizer[Normalizer & Fingerprint]
+        
+        Normalizer -->|Batch split into one chunk per worker| WorkerPool[Worker Thread Pool]
+        WorkerPool -->|Chunks scored in parallel, rejoined in order| RiskResult[Risk Level: Low/Med/High]
+        
+        RiskResult -->|Transaction Batch| DBWriter[Batch Persister + RetryPolicy]
+        RejectionBatch -->|Rejection Batch| DBWriter
+    end
+    
+    DBWriter -->|1. Claim batch number| LedgerDB[(PostgreSQL: import_batches)]
+    LedgerDB -.->|Claim lost = already committed, skip| DBWriter
+    DBWriter -->|2. ON CONFLICT DO NOTHING| TxDB[(PostgreSQL: transactions)]
+    DBWriter -->|3. Batch Insert| RejDB[(PostgreSQL: rejections)]
+    DBWriter -->|4. Advance counters| ImportDB[(PostgreSQL: imports)]
+    
+    subgraph Observability & Monitoring
+        EventLoop[perf_hooks Monitor] -->|Track Delay & ELU| Metrics[MetricsMonitor /metrics]
+        ProcessMemory[Process Memory/CPU] -->|Track RSS & Heap| Metrics
+    end
+```
+
+---
+
+## 1. System Components & Module Boundaries
+
+- **Presentation Layer (`src/presentation/`)**: Express controllers, routes, request validation, Multer file upload stream handling, and structured JSON error handling.
+- **Application Layer (`src/application/`)**: Use cases (`CreateImport`, `GetImportStatus`, `CancelImport`, `GetSummary`, `GetRejections`) and background streaming job processor (`ImportProcessor`).
+- **Domain Layer (`src/domain/`)**: Repository abstractions (`IImportRepository`, `ITransactionRepository`, `IRejectionRepository`), entities, domain validators, normalizers, fingerprint calculators, and risk scoring logic.
+- **Infrastructure Layer (`src/infrastructure/`)**: Drizzle ORM PostgreSQL repositories, local file storage, worker thread pool, Pino logger, Prometheus metrics monitor, retry policy, and job recovery.
+
+---
+
+## 2. Key Strategies & Mechanisms
+
+### Backpressure & Bounded Concurrency
+- **Stream Backpressure**: The parser consumes the file with `for await (const line of rl)`. The async iterator stops pulling while the loop body is awaiting risk scoring and the database write, and readline in turn pauses the underlying file stream once its internal buffer fills. Resident memory is therefore bounded by one batch plus that buffer, regardless of file size. Explicit `rl.pause()` / `rl.resume()` calls were removed: they added nothing on top of iterator backpressure, and pausing a readline whose source had already ended (a small file delivered in one chunk) threw `ERR_USE_AFTER_CLOSE` and failed the import.
+- **Active Import Concurrency**: Enforces a maximum of `MAX_ACTIVE_IMPORTS` (default: 2) concurrent processing imports.
+- **Queue Bound**: `MAX_PENDING_IMPORTS` (default: 20) reserves capacity before file persistence. When full, the API returns `429 IMPORT_QUEUE_FULL`; uploads are never placed in an unbounded promise queue.
+
+### Idempotency & Duplicate Prevention
+- **Import Creation Idempotency**: DB table `idempotency_keys` with unique primary key `key`. A PostgreSQL transaction-scoped advisory lock keyed by `Idempotency-Key` makes the check/create sequence safe under concurrent requests.
+- **Transaction Duplicate Prevention**: PostgreSQL unique index `UNIQUE (provider_id, transaction_id)` enforces duplicate prevention across files, imports, process restarts, and concurrent workers using `ON CONFLICT DO NOTHING`.
+
+### Off-Event-Loop Risk Scoring
+- CPU-intensive risk calculation (a multi-round crypto hashing loop) runs on a fixed pool of Node `worker_threads` (`src/infrastructure/workers/worker-pool.ts`), so the HTTP event loop is never occupied by scoring.
+- **Each batch is split into one chunk per worker** and the chunks run in parallel, making a batch cost roughly `batchSize / poolSize` of serial scoring time. Sending a whole batch to a single worker would leave the rest of the pool idle and make the pool decorative. Chunks are contiguous slices and are re-joined in order, because the processor pairs results to records positionally.
+- **The pool is a failure domain of its own.** A worker that errors, exits, or exceeds `RISK_TASK_TIMEOUT_MS` has its task rejected and is replaced, so the pool does not silently shrink over a long run. Every reply carries the task id it answers, so a late reply from an abandoned task cannot resolve the wrong promise.
+- If no worker is available at all, scoring falls back to the main thread — but that path increments `app_risk_inline_fallbacks_total` and logs at error level rather than degrading silently.
+
+### Retry Policy & Error Classification
+- `ObservableRetryPolicy` is injected into `ImportProcessor` and wraps **batch persistence**, the one operation with a genuine transient failure mode (connection drops, deadlocks, serialization failures, `too many connections`). Attempts are capped (`RETRY_MAX_ATTEMPTS`, default 4), backoff is exponential with full jitter so concurrent failures do not re-converge on the same retry instant, and every attempt is logged with `importId`, `batchNumber`, and `retryAttempt` and counted in `app_retry_attempts_total`.
+- **Retrying is safe here because the write is idempotent, not because the error looked benign.** Each batch claims a row in `import_batches` keyed by `(import_id, batch_number)` inside the same transaction that writes the rows and advances the counters. A replay of a batch that already committed — the ambiguous-commit case, where PostgreSQL committed but the client never saw the acknowledgement — loses the claim, writes nothing, and returns the counts the first commit recorded. Progress counters are therefore effectively-once.
+- **Never retried**: validation failures, duplicate records, constraint violations (`23505`, `23503`, `23502`, `22001`), cancellations, and programming errors (`TypeError`, `SyntaxError`, `ReferenceError`). These are deterministic — another attempt produces the same failure and only burns capacity.
+- **Retry storms** are avoided by the attempt cap, the jittered backoff, and the bounded import queue upstream: a struggling database cannot be met with unbounded concurrent retries.
+- **After the final attempt** the error propagates, the import is marked `failed` with a stable non-sensitive reason, and `app_processing_failures_total` increments. The raw error stays in the logs.
+- Retries are **cancellable**: the policy accepts an `AbortSignal`, checks it before each attempt, and interrupts the backoff sleep, so shutdown does not wait out a long backoff.
+
+### Graceful Shutdown & Job Recovery
+On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and fails readiness (so a load balancer drains it) → signals in-flight imports to stop at their **next batch boundary** → closes the HTTP server → drains the import queue → drains and terminates the worker pool → closes the database pool → flushes logs and exits.
+
+- **The batch currently being written always commits.** Shutdown only prevents the *next* batch from starting; it never aborts an open database transaction, so the ledger and the counters stay consistent.
+- **Grace period**: `SHUTDOWN_GRACE_PERIOD_MS` (default 30s). If it expires, the process logs at error level and exits non-zero with work still in flight. Those imports are left in `processing` and are picked up by `JobRecoveryService` on the next start.
+- **Cancellation vs. shutdown** are deliberately different: cancellation is a user decision about one import and terminates it as `cancelled`, retaining everything committed before the checkpoint; shutdown is an operational event affecting every import and terminates them as `failed`, so they are visible as unfinished rather than silently marked done.
+- On startup, `JobRecoveryService` marks imports left in `processing` as `failed` and imports left in `cancelling` as `cancelled`, so no job stays locked in a transient state across a restart.
+
+### Structured Logging
+- A single `ILogger` port (`src/domain/ports/logger.interface.ts`) is implemented by a Pino adapter and injected from the composition root; no module constructs its own logger.
+- Every HTTP request gets a correlation id (honouring an inbound `X-Request-Id`, stripped of control characters so a header cannot forge log records) which is echoed in the response header, attached to the request's child logger, and returned in every error envelope.
+- Child loggers carry `importId`, `providerId`, `batchNumber`, `component`, and `retryAttempt` without threading them through call signatures.
+- Transaction descriptions and file paths are redacted at the root logger, so no child can leak them.
+
+### API Documentation
+- An OpenAPI 3.0 document is served at `/openapi.json` with Swagger UI at `/docs`. It is a typed object compiled into the bundle rather than a YAML asset, so it needs no extra copy step in the Dockerfile and cannot drift out of the build.
