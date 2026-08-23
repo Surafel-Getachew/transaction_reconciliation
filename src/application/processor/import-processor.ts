@@ -14,6 +14,7 @@ import { FingerprintCalculator } from "../../domain/services/fingerprint.js";
 import { RiskInput } from "../../domain/services/risk-scorer.js";
 import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
 import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
+import { MetricsMonitor } from "../../infrastructure/metrics/metrics-monitor.js";
 import { IImportBatchPersister } from "../../domain/repositories/import-batch-persister.interface.js";
 
 export interface ImportProcessorOptions {
@@ -93,7 +94,8 @@ export class ImportProcessor {
     }
 
     this.currentActiveImports++;
-    // TODO increment metrics
+    const metrics = MetricsMonitor.getInstance();
+    metrics.incrementActiveImports();
 
     await this.importRepo.markStarted(importId);
 
@@ -167,7 +169,7 @@ export class ImportProcessor {
         // Stream Backpressure: Pause stream reading while processing & persisting batch
         if (pendingValid.length + pendingRejections.length >= this.batchSize) {
           rl.pause();
-          //  TODO: set metric depth
+          metrics.setQueueDepth(pendingValid.length + pendingRejections.length);
 
           const isCancelled = await this.flushBatch(
             importId,
@@ -177,7 +179,7 @@ export class ImportProcessor {
           );
           pendingValid = [];
           pendingRejections = [];
-          //  TODO: set metric depth
+          metrics.setQueueDepth(0);
 
           if (isCancelled) {
             rl.close();
@@ -218,7 +220,7 @@ export class ImportProcessor {
       );
     } finally {
       this.currentActiveImports = Math.max(0, this.currentActiveImports - 1);
-      //  TODO: decrement metric depth
+      metrics.decrementActiveImports();
       await this.fileStorage.deleteFile(filePath);
     }
   }
@@ -318,7 +320,12 @@ export class ImportProcessor {
       });
     }
 
-    //  TODO record the processed batch in metric
+    MetricsMonitor.getInstance().recordProcessedBatch(
+      processedDelta,
+      acceptedDelta,
+      rejectedDelta,
+      duplicateDelta,
+    );
 
     return false;
   }
