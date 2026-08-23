@@ -2,6 +2,7 @@ import express, { Express } from "express";
 import cors from "cors";
 import { Router } from "express";
 import { errorHandler } from "./middlewares/error-handler.js";
+import { MetricsMonitor } from "../infrastructure/metrics/metrics-monitor.js";
 
 export function createApp(router: Router): Express {
   const app = express();
@@ -12,6 +13,7 @@ export function createApp(router: Router): Express {
 
   app.use((req, res, next) => {
     res.on("finish", () => {});
+    MetricsMonitor.getInstance().recordHttpRequest(res.statusCode);
     next();
   });
 
