@@ -21,7 +21,7 @@ flowchart TD
         Normalizer -->|Batch split into one chunk per worker| WorkerPool[Worker Thread Pool]
         WorkerPool -->|Chunks scored in parallel, rejoined in order| RiskResult[Risk Level: Low/Med/High]
         
-        RiskResult -->|Transaction Batch| DBWriter[Batch Persister + RetryPolicy]
+        RiskResult -->|Transaction Batch| DBWriter[Batch Persister + BackoffRetryPolicy]
         RejectionBatch -->|Rejection Batch| DBWriter
     end
     
@@ -66,12 +66,13 @@ flowchart TD
 - If no worker is available at all, scoring falls back to the main thread — but that path increments `app_risk_inline_fallbacks_total` and logs at error level rather than degrading silently.
 
 ### Retry Policy & Error Classification
-- `ObservableRetryPolicy` is injected into `ImportProcessor` and wraps **batch persistence**, the one operation with a genuine transient failure mode (connection drops, deadlocks, serialization failures, `too many connections`). Attempts are capped (`RETRY_MAX_ATTEMPTS`, default 4), backoff is exponential with full jitter so concurrent failures do not re-converge on the same retry instant, and every attempt is logged with `importId`, `batchNumber`, and `retryAttempt` and counted in `app_retry_attempts_total`.
-- **Retrying is safe here because the write is idempotent, not because the error looked benign.** Each batch claims a row in `import_batches` keyed by `(import_id, batch_number)` inside the same transaction that writes the rows and advances the counters. A replay of a batch that already committed — the ambiguous-commit case, where PostgreSQL committed but the client never saw the acknowledgement — loses the claim, writes nothing, and returns the counts the first commit recorded. Progress counters are therefore effectively-once.
-- **Never retried**: validation failures, duplicate records, constraint violations (`23505`, `23503`, `23502`, `22001`), cancellations, and programming errors (`TypeError`, `SyntaxError`, `ReferenceError`). These are deterministic — another attempt produces the same failure and only burns capacity.
+- The `IRetryPolicy` port (`src/domain/retry/retry-policy.interface.ts`) is implemented by `BackoffRetryPolicy` and injected into `DrizzleImportBatchPersister`, wrapping **batch persistence** — the one operation with a genuine transient failure mode (connection drops, deadlocks, serialization failures). Attempts are capped (`RETRY_MAX_ATTEMPTS`, default 4), backoff is exponential with full jitter so concurrent failures do not re-converge on the same retry instant, and every retry is logged with `operationName`, `retryAttempt`, `delayMs`, and `errorCode` and counted in `app_retry_attempts_total`.
+- **The retried unit is a single database transaction.** `persist()` writes the transaction rows, the rejection rows, and the counter increments inside one `BEGIN`/`COMMIT`. A failed attempt therefore rolls back completely and leaves nothing behind for the next attempt to trip over, and the transaction insert itself is guarded by `ON CONFLICT DO NOTHING` on `(provider_id, transaction_id)`.
+- **Known gap — the ambiguous commit.** If PostgreSQL commits but the acknowledgement is lost (connection reset at exactly the wrong moment), a retry re-applies the counter increments and re-inserts the rejection rows, which carry no unique constraint. Transaction rows are still protected by the unique index, so the ledger stays correct, but progress counters can overcount for that batch. Closing this needs a batch-level claim key — an `import_batches` row keyed by `(import_id, batch_number)` written in the same transaction — which is not implemented. The delivery guarantee today is therefore **at-least-once for counters, effectively-once for accepted transactions**.
+- **Never retried**: validation failures, duplicate records, constraint violations (`23505`, `23503`), cancellations, and programming errors (`TypeError`, `SyntaxError`). These are deterministic — another attempt produces the same failure and only burns capacity. Validation happens before persistence, so a bad record can never reach the retry path.
 - **Retry storms** are avoided by the attempt cap, the jittered backoff, and the bounded import queue upstream: a struggling database cannot be met with unbounded concurrent retries.
-- **After the final attempt** the error propagates, the import is marked `failed` with a stable non-sensitive reason, and `app_processing_failures_total` increments. The raw error stays in the logs.
-- Retries are **cancellable**: the policy accepts an `AbortSignal`, checks it before each attempt, and interrupts the backoff sleep, so shutdown does not wait out a long backoff.
+- **After the final attempt** the error propagates out of `persist()` to `ImportProcessor`, which marks the import `failed` with a non-sensitive reason and logs `import_failed` with the error. The raw error stays in the logs and never reaches the client.
+- Retries are **cancellable**: the policy accepts an `AbortSignal`, stops retrying once it is aborted, and interrupts the backoff sleep. The composition root wires this to the shutdown controller, so `SIGTERM` does not wait out a long backoff.
 
 ### Graceful Shutdown & Job Recovery
 On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and fails readiness (so a load balancer drains it) → signals in-flight imports to stop at their **next batch boundary** → closes the HTTP server → drains the import queue → drains and terminates the worker pool → closes the database pool → flushes logs and exits.
@@ -82,10 +83,10 @@ On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and 
 - On startup, `JobRecoveryService` marks imports left in `processing` as `failed` and imports left in `cancelling` as `cancelled`, so no job stays locked in a transient state across a restart.
 
 ### Structured Logging
-- A single `ILogger` port (`src/domain/ports/logger.interface.ts`) is implemented by a Pino adapter and injected from the composition root; no module constructs its own logger.
-- Every HTTP request gets a correlation id (honouring an inbound `X-Request-Id`, stripped of control characters so a header cannot forge log records) which is echoed in the response header, attached to the request's child logger, and returned in every error envelope.
-- Child loggers carry `importId`, `providerId`, `batchNumber`, `component`, and `retryAttempt` without threading them through call signatures.
-- Transaction descriptions and file paths are redacted at the root logger, so no child can leak them.
+- A single `ILogger` port (`src/domain/logging/logger.interface.ts`) is implemented by a Pino adapter and injected from the composition root; no module constructs its own logger. Components default to a silent logger so tests stay quiet.
+- Every HTTP request gets a correlation id — an inbound `X-Request-Id` is honoured only when it matches a short safe-character pattern, otherwise one is generated — which is echoed in the response header, attached to the request's child logger, and returned in every error envelope. Every field is JSON-encoded, so untrusted input cannot forge a log line.
+- The processor binds `importId` and `providerId` to a child logger for the life of an import; batch records add `batchNumber`, `recordCount`, and `durationMs`, and shutdown records add `signal` and `shutdownState`.
+- Transaction descriptions and raw rejected values are redacted at the root logger, so no child can leak them.
 
 ### API Documentation
 - An OpenAPI 3.0 document is served at `/openapi.json` with Swagger UI at `/docs`. It is a typed object compiled into the bundle rather than a YAML asset, so it needs no extra copy step in the Dockerfile and cannot drift out of the build.

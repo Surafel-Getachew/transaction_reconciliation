@@ -19,10 +19,12 @@ import { createApp } from "./presentation/server.js";
 import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
 import { ImportJobQueue } from "./application/queue/import-job-queue.js";
 import { createLogger } from "./infrastructure/logging/pino-logger.js";
+import { BackoffRetryPolicy } from "./infrastructure/retry/backoff-retry-policy.js";
 
 dotenv.config();
 
 const logger = createLogger();
+const shutdownSignal = new AbortController();
 
 async function main() {
   logger.info({}, "service_starting");
@@ -48,7 +50,19 @@ async function main() {
   const importRepo = new DrizzleImportRepository(db);
   const transactionRepo = new DrizzleTransactionRepository(db);
   const rejectionRepo = new DrizzleRejectionRepository(db);
-  const batchPersister = new DrizzleImportBatchPersister(db);
+  const retryPolicy = new BackoffRetryPolicy(logger, {
+    maxAttempts: process.env.RETRY_MAX_ATTEMPTS
+      ? parseInt(process.env.RETRY_MAX_ATTEMPTS, 10)
+      : 4,
+    initialDelayMs: process.env.RETRY_INITIAL_DELAY_MS
+      ? parseInt(process.env.RETRY_INITIAL_DELAY_MS, 10)
+      : 100,
+    maxDelayMs: process.env.RETRY_MAX_DELAY_MS
+      ? parseInt(process.env.RETRY_MAX_DELAY_MS, 10)
+      : 3000,
+    signal: shutdownSignal.signal,
+  });
+  const batchPersister = new DrizzleImportBatchPersister(db, retryPolicy);
   const fileStorage = new LocalFileStorage(process.env.TEMP_UPLOAD_DIR);
   const riskWorkerPool = new RiskWorkerPool(
     process.env.WORKER_CONCURRENCY
@@ -124,6 +138,7 @@ async function main() {
     isShuttingDown = true;
     acceptingTraffic = false;
     importQueue.stopAccepting();
+    shutdownSignal.abort();
     const shutdownLog = logger.child({ signal, shutdownState: "draining" });
     shutdownLog.info({ queueDepth: importQueue.depth }, "shutdown_started");
 

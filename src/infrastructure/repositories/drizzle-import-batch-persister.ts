@@ -8,11 +8,25 @@ import { Database } from "../db/index.js";
 import { imports } from "../db/schema/imports.js";
 import { rejections } from "../db/schema/rejections.js";
 import { transactions } from "../db/schema/transactions.js";
+import {
+  IRetryPolicy,
+  noRetryPolicy,
+} from "../../domain/retry/retry-policy.interface.js";
 
 export class DrizzleImportBatchPersister implements IImportBatchPersister {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly retryPolicy: IRetryPolicy = noRetryPolicy,
+  ) {}
 
   async persist(batch: ImportBatch): Promise<BatchPersistResult> {
+    return this.retryPolicy.execute(
+      () => this.persistOnce(batch),
+      { operationName: "persist_import_batch" },
+    );
+  }
+
+  private async persistOnce(batch: ImportBatch): Promise<BatchPersistResult> {
     return this.db.transaction(async (tx) => {
       const insertedRows =
         batch.transactions.length === 0

@@ -5,6 +5,7 @@ export interface RetryOptions {
   backoffFactor?: number;
   isRetryable?: (error: any) => boolean;
   onRetry?: (attempt: number, error: any, delayMs: number) => void;
+  signal?: AbortSignal;
 }
 
 export class RetryPolicy {
@@ -24,7 +25,11 @@ export class RetryPolicy {
       try {
         return await fn();
       } catch (error: any) {
-        if (attempt >= maxAttempts || !isRetryable(error)) {
+        if (
+          attempt >= maxAttempts ||
+          options?.signal?.aborted ||
+          !isRetryable(error)
+        ) {
           throw error;
         }
 
@@ -39,9 +44,26 @@ export class RetryPolicy {
           options.onRetry(attempt, error, jitteredDelay);
         }
 
-        await new Promise((r) => setTimeout(r, jitteredDelay));
+        await RetryPolicy.sleep(jitteredDelay, options?.signal);
       }
     }
+  }
+
+  private static sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   public static defaultIsRetryable(error: any): boolean {
