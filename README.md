@@ -118,12 +118,11 @@ npm run test:all
 | `DATABASE_URL` | `postgres://postgres:postgres@127.0.0.1:5433/transaction_db` | PostgreSQL connection string |
 | `MAX_FILE_SIZE_BYTES` | `524288000` (500MB) | Maximum file upload size |
 | `TEMP_UPLOAD_DIR` | `./uploads` | Temporary file storage path |
-| `WORKER_CONCURRENCY` | CPU count − 1 | Number of worker threads for risk scoring |
+| `WORKER_CONCURRENCY` | `4` | Risk-scoring worker threads. **Tune per machine** — scoring is CPU-bound, so past the fast physical core count extra threads slow batches down rather than speeding them up. Measure with `npm run benchmark`. |
 | `BATCH_SIZE` | `1000` | Database insert batch size |
 | `MAX_ACTIVE_IMPORTS` | `2` | Maximum imports processed concurrently |
 | `MAX_PENDING_IMPORTS` | `20` | Maximum queued uploads; further requests receive 429 |
 | `MAX_PERSISTED_REJECTIONS` | `10000` | Cap on rejection rows stored per import; counters still reflect every rejected record |
-| `RISK_TASK_TIMEOUT_MS` | `60000` | Deadline for one risk-scoring chunk before its worker is replaced |
 | `RETRY_MAX_ATTEMPTS` | `4` | Maximum attempts for a retryable batch write |
 | `RETRY_INITIAL_DELAY_MS` | `100` | First retry backoff before jitter |
 | `RETRY_MAX_DELAY_MS` | `3000` | Backoff ceiling |
@@ -146,9 +145,9 @@ Set `LOG_LEVEL=debug` to add per-batch records (scoring duration, commit duratio
 `GET /metrics` exposes event-loop delay percentiles, event-loop utilization, RSS and heap, CPU time, active imports, queue depth, worker-pool occupancy, retry attempts, inline-fallback count, processing failures, and record counters. No identifier is used as a metric label, so cardinality stays flat.
 
 - **How blocking is detected**: `perf_hooks.monitorEventLoopDelay()` samples the lag between when a timer should fire and when it does; `performance.eventLoopUtilization()` reports the fraction of wall time the loop spent working rather than idle.
-- **Thresholds worth alerting on**: event-loop delay P99 above ~50 ms, utilization sustained above ~0.85, or any non-zero `app_risk_inline_fallbacks_total`.
+- **Thresholds worth alerting on**: event-loop delay P99 above ~50 ms, or utilization sustained above ~0.85.
 - **CPU saturation vs. downstream I/O latency**: CPU saturation shows high utilization *and* high delay together — the loop is busy. Slow downstream I/O shows the opposite signature: request latency rises while utilization stays low and delay stays flat, because the process is waiting, not computing. Distinguishing them tells you whether to add workers or to look at the database.
-- **What could still block the loop**: `JSON.parse` of each line and the SHA-256 fingerprint are on the main thread (both are microsecond-scale per record, and the batch boundary yields between them); the inline scoring fallback would block heavily, which is why it is counted and logged at error level.
+- **What could still block the loop**: `JSON.parse` of each line and the SHA-256 fingerprint are on the main thread (both are microsecond-scale per record, and the batch boundary yields between them); the inline scoring fallback would block heavily, which is why it only runs when no worker pool could be created at all.
 - **How latency-sensitive endpoints are protected**: risk scoring — the only genuinely expensive work — runs on worker threads; imports are bounded by a queue that returns 429 rather than accumulating work; and reading is throttled by stream backpressure so a large file cannot outpace the pipeline.
 
 ---

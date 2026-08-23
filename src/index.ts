@@ -64,11 +64,7 @@ async function main() {
   });
   const batchPersister = new DrizzleImportBatchPersister(db, retryPolicy);
   const fileStorage = new LocalFileStorage(process.env.TEMP_UPLOAD_DIR);
-  const riskWorkerPool = new RiskWorkerPool(
-    process.env.WORKER_CONCURRENCY
-      ? parseInt(process.env.WORKER_CONCURRENCY, 10)
-      : undefined,
-  );
+  const riskWorkerPool = new RiskWorkerPool();
 
   // 2. Application processor & use cases
   const importProcessor = new ImportProcessor(

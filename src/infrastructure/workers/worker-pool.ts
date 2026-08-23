@@ -1,5 +1,4 @@
 import { Worker } from "node:worker_threads";
-import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -17,6 +16,12 @@ export interface IRiskWorkerPool {
   destroy(): Promise<void>;
 }
 
+// Tune per machine: CPU-bound scoring stops scaling past the fast physical cores.
+const DEFAULT_POOL_SIZE = Math.max(
+  1,
+  parseInt(process.env.WORKER_CONCURRENCY || "4", 10) || 4,
+);
+
 export class RiskWorkerPool implements IRiskWorkerPool {
   private workers: Worker[] = [];
   private idleWorkers: Worker[] = [];
@@ -29,8 +34,9 @@ export class RiskWorkerPool implements IRiskWorkerPool {
 
   constructor(poolSize?: number) {
     this.poolSize =
-      poolSize ||
-      Math.max(1, (os.availableParallelism?.() || os.cpus().length) - 1);
+      poolSize && Number.isInteger(poolSize) && poolSize > 0
+        ? poolSize
+        : DEFAULT_POOL_SIZE;
     this.initWorkers();
   }
 
@@ -67,6 +73,21 @@ export class RiskWorkerPool implements IRiskWorkerPool {
       return items.map((item) => RiskScorer.calculate(item));
     }
 
+    // Spread one batch across the whole pool; a single task would leave every
+    // other worker idle for the duration of the batch.
+    const chunkSize = Math.ceil(items.length / this.workers.length);
+    const chunks: RiskInput[][] = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      chunks.push(items.slice(i, i + chunkSize));
+    }
+
+    const chunkResults = await Promise.all(
+      chunks.map((chunk) => this.runTask(chunk)),
+    );
+    return chunkResults.flat();
+  }
+
+  private runTask(items: RiskInput[]): Promise<RiskResult[]> {
     return new Promise((resolve, reject) => {
       this.taskQueue.push({ items, resolve, reject });
       this.dispatch();
@@ -74,10 +95,12 @@ export class RiskWorkerPool implements IRiskWorkerPool {
   }
 
   private dispatch() {
-    if (this.taskQueue.length === 0 || this.idleWorkers.length === 0) {
-      return;
+    while (this.taskQueue.length > 0 && this.idleWorkers.length > 0) {
+      this.assignNext();
     }
+  }
 
+  private assignNext() {
     const worker = this.idleWorkers.pop()!;
     const task = this.taskQueue.shift()!;
 

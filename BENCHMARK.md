@@ -62,7 +62,20 @@ Sampling `app_risk_workers{state="busy"}` once per second across 182 samples:
 | 1–5 | 29 |
 | 0 | 73 |
 
-Previously each batch was posted to a **single** worker while the rest of the pool sat idle, so the pool was decorative and throughput was capped by one thread (measured at ~2,000 records/sec/thread for this scoring function — about 250 seconds of pure single-threaded CPU for 500k records). Splitting each batch into one chunk per worker is what puts all six to work.
+Previously each batch was posted to a **single** worker while the rest of the pool sat idle, so the pool was decorative and throughput was capped by one thread. Splitting each batch into one chunk per worker is what puts the pool to work.
+
+Isolated pool measurement on an 8-core Apple M1 (2,000 records per batch, median of 3 runs), which is what motivated the change and the `WORKER_CONCURRENCY` default of 4:
+
+| Pool size | Throughput | 500k records |
+| :--- | :--- | :--- |
+| 1 (equivalent to the old behaviour) | 1,769 rec/s | ~283 s |
+| 2 | 2,354 rec/s | ~212 s |
+| 3 | 3,363 rec/s | ~149 s |
+| 4 (default) | 3,039 rec/s | ~165 s |
+| 6 | 2,984 rec/s | ~168 s |
+| 8 | 3,206 rec/s | ~156 s |
+
+The speedup is **~1.7×, not ~4×**, and it plateaus from three workers upward. Scoring is a tight SHA-256 loop, so it is bounded by the fast physical cores rather than the thread count: a batch completes only when its slowest chunk does, and on an M1 the extra chunks land on efficiency cores. Raising `WORKER_CONCURRENCY` past the plateau buys nothing and costs one V8 isolate per thread. The number is machine-specific — measure before changing it.
 
 The `0` samples are not idleness — they are the database-write phase of the batch cycle, which is now the limiting factor.
 
