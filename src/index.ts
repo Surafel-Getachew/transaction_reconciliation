@@ -18,6 +18,7 @@ import { createRouter } from "./presentation/http/routes.js";
 import { createApp } from "./presentation/server.js";
 import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
 import { ImportJobQueue } from "./application/queue/import-job-queue.js";
+
 dotenv.config();
 
 async function main() {
@@ -66,6 +67,7 @@ async function main() {
     },
     batchPersister,
   );
+
   const importQueue = new ImportJobQueue(
     (job) =>
       importProcessor.processImport(job.importId, job.filePath, job.providerId),
@@ -109,6 +111,41 @@ async function main() {
   const server = app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
   });
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+  const gracefulShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    acceptingTraffic = false;
+    importQueue.stopAccepting();
+    console.log(`Received ${signal}. Starting graceful shutdown...`);
+
+    // Force exit timeout
+    const forceExitTimer = setTimeout(() => {
+      console.error("Graceful shutdown timeout exceeded. Exiting forcibly.");
+      process.exit(1);
+    }, 10000);
+
+    server.close(async () => {
+      console.log("HTTP server closed.");
+      try {
+        await importQueue.drain();
+        await riskWorkerPool.destroy();
+        await pool.end();
+        console.log("Database connections closed.");
+        clearTimeout(forceExitTimer);
+        process.exit(0);
+      } catch (err) {
+        console.error("Error during shutdown:", err);
+        clearTimeout(forceExitTimer);
+        process.exit(1);
+      }
+    });
+  };
+
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 }
 
 main().catch((err) => {
