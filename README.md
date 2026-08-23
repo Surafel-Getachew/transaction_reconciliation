@@ -118,7 +118,7 @@ npm run test:all
 | `DATABASE_URL` | `postgres://postgres:postgres@127.0.0.1:5433/transaction_db` | PostgreSQL connection string |
 | `MAX_FILE_SIZE_BYTES` | `524288000` (500MB) | Maximum file upload size |
 | `TEMP_UPLOAD_DIR` | `./uploads` | Temporary file storage path |
-| `WORKER_CONCURRENCY` | `4` | Number of worker threads for risk scoring |
+| `WORKER_CONCURRENCY` | CPU count − 1 | Number of worker threads for risk scoring |
 | `BATCH_SIZE` | `1000` | Database insert batch size |
 | `MAX_ACTIVE_IMPORTS` | `2` | Maximum imports processed concurrently |
 | `MAX_PENDING_IMPORTS` | `20` | Maximum queued uploads; further requests receive 429 |
@@ -156,6 +156,6 @@ Set `LOG_LEVEL=debug` to add per-batch records (scoring duration, commit duratio
 ## Known Limitations
 
 - **Single Node Queue**: Background processing uses an in-process bounded queue with worker threads. For multi-node distributed deployments across Kubernetes pods, a distributed Redis-backed queue (e.g. BullMQ) can be added as a worker transport.
-- **Delivery model**: **effectively-once for accepted transactions and progress counters.** Each batch commits its rows, its ledger claim, and its counter update in one database transaction, keyed by `(import_id, batch_number)`; a replayed batch is absorbed rather than double-counted. Duplicate transactions are additionally prevented by `UNIQUE (provider_id, transaction_id)`. A process interruption marks an active import `failed` on restart rather than resuming it — automatic redelivery would need a distributed queue.
+- **Delivery model**: **effectively-once for accepted transactions, at-least-once for progress counters.** Each batch commits its rows and its counter update in one database transaction, and duplicate transactions are prevented by `UNIQUE (provider_id, transaction_id)`. If a commit succeeds but its acknowledgement is lost, a retry re-applies the counter increments and re-inserts rejection rows, so counters can overcount for that batch; closing this needs a per-batch claim key keyed by `(import_id, batch_number)`, which is not implemented. A process interruption marks an active import `failed` on restart rather than resuming it — automatic redelivery would need a distributed queue.
 - **Single-instance job recovery**: `JobRecoveryService` marks *all* imports in `processing` as failed at startup. That is correct for a single instance, but a second instance starting up would mark a live instance's in-flight import as failed. Multi-instance deployment needs a job lease/owner column first.
 - **Pending imports are not re-queued**: the job queue is in-process, so an import that crashed before processing began stays `pending` rather than being picked up on restart.

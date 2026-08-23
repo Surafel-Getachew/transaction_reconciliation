@@ -8,6 +8,26 @@ import { GetSummaryUseCase } from "../../../application/use-cases/get-summary.us
 import { GetRejectionsUseCase } from "../../../application/use-cases/get-rejections.usecase.js";
 import { MetricsMonitor } from "../../../infrastructure/metrics/metrics-monitor.js";
 import { pool } from "../../../infrastructure/db/index.js";
+import {
+  NdjsonSniffer,
+  NDJSON_SNIFF_BYTES,
+} from "../../../domain/services/ndjson-sniffer.js";
+
+async function readHead(
+  filePath: string,
+): Promise<{ head: string; truncated: boolean }> {
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(NDJSON_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, NDJSON_SNIFF_BYTES, 0);
+    return {
+      head: buffer.subarray(0, bytesRead).toString("utf8"),
+      truncated: bytesRead === NDJSON_SNIFF_BYTES,
+    };
+  } finally {
+    await handle.close();
+  }
+}
 
 export class ImportController {
   constructor(
@@ -53,6 +73,25 @@ export class ImportController {
             code: "FILE_REQUIRED",
             message:
               'NDJSON file must be uploaded in multipart form field "file"',
+          },
+        });
+      }
+
+      const { head, truncated } = req.file.path
+        ? await readHead(req.file.path)
+        : {
+            head: req.file.buffer
+              .subarray(0, NDJSON_SNIFF_BYTES)
+              .toString("utf8"),
+            truncated: req.file.buffer.length > NDJSON_SNIFF_BYTES,
+          };
+
+      if (!NdjsonSniffer.looksLikeNdjson(head, truncated)) {
+        return res.status(400).json({
+          error: {
+            code: "INVALID_FILE_TYPE",
+            message: "File content is not valid NDJSON",
+            requestId: req.requestId,
           },
         });
       }

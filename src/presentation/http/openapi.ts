@@ -101,7 +101,7 @@ export const openApiDocument = {
                   file: {
                     type: "string",
                     format: "binary",
-                    description: `NDJSON file, one transaction per line. Must have a .ndjson extension. Maximum ${MAX_FILE_SIZE_BYTES} bytes.`,
+                    description: `NDJSON file, one transaction per line. Must have a .ndjson extension and its content must begin with a JSON object — the filename and MIME type alone are not trusted. Maximum ${MAX_FILE_SIZE_BYTES} bytes.`,
                   },
                 },
               },

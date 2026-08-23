@@ -9,6 +9,9 @@ const upload = multer({
   dest: process.env.TEMP_UPLOAD_DIR || "./uploads",
   limits: {
     fileSize: parseInt(process.env.MAX_FILE_SIZE_BYTES || "524288000", 10), // 500MB
+    files: 1,
+    fields: 5,
+    parts: 10,
   },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();

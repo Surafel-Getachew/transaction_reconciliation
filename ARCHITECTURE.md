@@ -59,6 +59,15 @@ flowchart TD
 - **Import Creation Idempotency**: DB table `idempotency_keys` with unique primary key `key`. A PostgreSQL transaction-scoped advisory lock keyed by `Idempotency-Key` makes the check/create sequence safe under concurrent requests.
 - **Transaction Duplicate Prevention**: PostgreSQL unique index `UNIQUE (provider_id, transaction_id)` enforces duplicate prevention across files, imports, process restarts, and concurrent workers using `ON CONFLICT DO NOTHING`.
 
+### Upload Validation
+- **The filename and the client MIME type are never the basis for acceptance.** The `.ndjson` extension check in the multer `fileFilter` is only a cheap early gate that avoids spooling an obviously wrong 500MB body to disk; it is not the security boundary.
+- The authoritative check is on content: after the upload lands on disk, the first 64KB are read and `NdjsonSniffer` requires the first non-blank line (after any byte order mark) to parse as a JSON **object**. This rejects a renamed archive, a CSV, a JSON array, pretty-printed JSON, and an empty file, all of which pass an extension check. Content holding a NUL byte is rejected outright as binary.
+- A first record larger than the 64KB window is accepted and left to per-line validation, so a legitimately long record is rejected as one bad line rather than failing the whole import.
+- **The MIME type is deliberately not checked at all.** An allowlist would be trivially satisfied by an attacker setting the header, while rejecting honest clients: `curl -F "file=@data.ndjson"` sends `application/octet-stream`. It would add no security and break the most common upload path.
+- Request shape is bounded independently of content: multer caps `fileSize`, `files: 1`, `fields: 5`, and `parts: 10`, and the JSON and urlencoded body parsers are capped at 1MB. Each limit maps to a distinct client error — `TOO_MANY_FILES`, `UNEXPECTED_FILE_FIELD`, `TOO_MANY_PARTS`, `TOO_MANY_FIELDS`, `IMPORT_FILE_TOO_LARGE`, `REQUEST_BODY_TOO_LARGE` — rather than surfacing as a 500.
+- Rejected uploads return `400 INVALID_FILE_TYPE`, and the staged temp file is removed in the request's `finally` block, so a rejected upload leaves nothing on disk.
+- Path traversal is not reachable from the filename: multer names the staged file itself, and `LocalFileStorage` names the stored file from the generated import id, so `originalname` never reaches a filesystem path.
+
 ### Off-Event-Loop Risk Scoring
 - CPU-intensive risk calculation (a multi-round crypto hashing loop) runs on a fixed pool of Node `worker_threads` (`src/infrastructure/workers/worker-pool.ts`), so the HTTP event loop is never occupied by scoring.
 - **Each batch is split into one chunk per worker** and the chunks run in parallel, making a batch cost roughly `batchSize / poolSize` of serial scoring time. Sending a whole batch to a single worker would leave the rest of the pool idle and make the pool decorative. Chunks are contiguous slices and are re-joined in order, because the processor pairs results to records positionally.
