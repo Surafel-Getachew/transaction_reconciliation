@@ -76,6 +76,21 @@ export class DrizzleImportRepository implements IImportRepository {
 
     return res[0]?.import || null;
   }
+
+  async updateStatus(
+    id: string,
+    status: ImportRecord["status"],
+    failureReason?: string | null,
+  ): Promise<void> {
+    await this.db
+      .update(imports)
+      .set({
+        status,
+        failureReason: failureReason ?? null,
+      })
+      .where(eq(imports.id, id));
+  }
+
   async updateProgress(
     id: string,
     deltas: {

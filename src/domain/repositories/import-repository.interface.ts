@@ -10,6 +10,11 @@ export interface IImportRepository {
   ): Promise<{ importRecord: ImportRecord; isDuplicate: boolean }>;
   findById(id: string): Promise<ImportRecord | null>;
   findByIdempotencyKey(key: string): Promise<ImportRecord | null>;
+  updateStatus(
+    id: string,
+    status: ImportRecord["status"],
+    failureReason?: string | null,
+  ): Promise<void>;
   updateProgress(
     id: string,
     deltas: {

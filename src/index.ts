@@ -10,6 +10,10 @@ import { ImportProcessor } from "./application/processor/import-processor.js";
 import { runMigrations } from "./infrastructure/db/migrate.js";
 import { CreateImportUseCase } from "./application/use-cases/create-import.usecase.js";
 import { ImportController } from "./presentation/http/controllers/import.controller.js";
+import { GetImportStatusUseCase } from "./application/use-cases/get-import-status.usecase.js";
+import { CancelImportUseCase } from "./application/use-cases/cancel-import.usecase.js";
+import { GetSummaryUseCase } from "./application/use-cases/get-summary.usecase.js";
+import { GetRejectionsUseCase } from "./application/use-cases/get-rejections.usecase.js";
 import { createRouter } from "./presentation/http/routes.js";
 import { createApp } from "./presentation/server.js";
 import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
@@ -79,11 +83,22 @@ async function main() {
     importProcessor,
     importQueue,
   );
+  const getImportStatusUseCase = new GetImportStatusUseCase(importRepo);
+  const cancelImportUseCase = new CancelImportUseCase(importRepo);
+  const getSummaryUseCase = new GetSummaryUseCase(transactionRepo);
+  const getRejectionsUseCase = new GetRejectionsUseCase(
+    rejectionRepo,
+    importRepo,
+  );
 
   // 3. Presentation controllers & HTTP server
   let acceptingTraffic = true;
   const controller = new ImportController(
     createImportUseCase,
+    getImportStatusUseCase,
+    cancelImportUseCase,
+    getSummaryUseCase,
+    getRejectionsUseCase,
     () => acceptingTraffic,
   );
 

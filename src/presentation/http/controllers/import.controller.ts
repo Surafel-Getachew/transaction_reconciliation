@@ -2,11 +2,20 @@ import { Request, Response, NextFunction } from "express";
 import { Readable } from "node:stream";
 import fs from "node:fs";
 import { CreateImportUseCase } from "../../../application/use-cases/create-import.usecase.js";
-
+import { GetImportStatusUseCase } from "../../../application/use-cases/get-import-status.usecase.js";
+import { CancelImportUseCase } from "../../../application/use-cases/cancel-import.usecase.js";
+import { GetSummaryUseCase } from "../../../application/use-cases/get-summary.usecase.js";
+import { GetRejectionsUseCase } from "../../../application/use-cases/get-rejections.usecase.js";
+import { MetricsMonitor } from "../../../infrastructure/metrics/metrics-monitor.js";
 import { pool } from "../../../infrastructure/db/index.js";
+
 export class ImportController {
   constructor(
     private createImportUseCase: CreateImportUseCase,
+    private getImportStatusUseCase: GetImportStatusUseCase,
+    private cancelImportUseCase: CancelImportUseCase,
+    private getSummaryUseCase: GetSummaryUseCase,
+    private getRejectionsUseCase: GetRejectionsUseCase,
     private isAcceptingTraffic: () => boolean = () => true,
   ) {}
 
@@ -76,6 +85,69 @@ export class ImportController {
     }
   };
 
+  public getImportStatus = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const id = String(req.params.id);
+      const status = await this.getImportStatusUseCase.execute(id);
+      res.status(200).json(status);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public cancelImport = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const id = String(req.params.id);
+      const result = await this.cancelImportUseCase.execute(id);
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public getSummary = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const id = String(req.params.id);
+      const summary = await this.getSummaryUseCase.execute(id);
+      res.status(200).json(summary);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public getRejections = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const id = String(req.params.id);
+      const limit = req.query.limit
+        ? parseInt(req.query.limit as string, 10)
+        : undefined;
+      const cursor = req.query.cursor
+        ? parseInt(req.query.cursor as string, 10)
+        : undefined;
+
+      const result = await this.getRejectionsUseCase.execute(id, limit, cursor);
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   public getLiveness = async (_req: Request, res: Response) => {
     res
       .status(200)
@@ -98,5 +170,11 @@ export class ImportController {
     } catch {
       res.status(503).json({ status: "not_ready", database: "disconnected" });
     }
+  };
+
+  public getMetrics = async (_req: Request, res: Response) => {
+    const metrics = MetricsMonitor.getInstance();
+    res.setHeader("Content-Type", "text/plain; version=0.0.4");
+    res.status(200).send(metrics.formatPrometheusMetrics());
   };
 }

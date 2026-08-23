@@ -12,8 +12,9 @@ export function createApp(router: Router): Express {
   app.use(express.urlencoded({ extended: true }));
 
   app.use((req, res, next) => {
-    res.on("finish", () => {});
-    MetricsMonitor.getInstance().recordHttpRequest(res.statusCode);
+    res.on("finish", () => {
+      MetricsMonitor.getInstance().recordHttpRequest(res.statusCode);
+    });
     next();
   });
 

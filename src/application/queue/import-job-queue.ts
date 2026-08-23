@@ -36,6 +36,7 @@ export class ImportJobQueue implements IImportJobQueue {
 
   reserve(): JobReservation | null {
     if (!this.accepting || this.depth >= this.maxPending) return null;
+    this.reserved++;
     let settled = false;
     const release = () => {
       if (!settled) {
@@ -54,14 +55,17 @@ export class ImportJobQueue implements IImportJobQueue {
       release,
     };
   }
+
   stopAccepting(): void {
     this.accepting = false;
   }
+
   async drain(): Promise<void> {
     if (this.active === 0 && this.queue.length === 0 && this.reserved === 0)
       return;
     await new Promise<void>((resolve) => this.drainWaiters.push(resolve));
   }
+
   private pump(): void {
     while (this.active < this.concurrency && this.queue.length > 0) {
       const job = this.queue.shift()!;
@@ -77,6 +81,7 @@ export class ImportJobQueue implements IImportJobQueue {
         });
     }
   }
+
   private resolveDrainers(): void {
     if (this.active !== 0 || this.queue.length !== 0 || this.reserved !== 0)
       return;

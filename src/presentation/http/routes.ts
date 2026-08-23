@@ -30,8 +30,13 @@ export function createRouter(controller: ImportController): Router {
   // Health & Metrics
   router.get("/health/live", controller.getLiveness);
   router.get("/health/ready", controller.getReadiness);
+  router.get("/metrics", controller.getMetrics);
 
   // Import API
   router.post("/v1/imports", upload.single("file"), controller.createImport);
+  router.get("/v1/imports/:id", controller.getImportStatus);
+  router.post("/v1/imports/:id/cancel", controller.cancelImport);
+  router.get("/v1/imports/:id/summary", controller.getSummary);
+  router.get("/v1/imports/:id/rejections", controller.getRejections);
   return router;
 }

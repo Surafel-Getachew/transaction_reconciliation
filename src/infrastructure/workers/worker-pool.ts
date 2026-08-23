@@ -1,9 +1,13 @@
-import { Worker } from 'node:worker_threads';
-import os from 'node:os';
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { RiskInput, RiskResult, RiskScorer } from '../../domain/services/risk-scorer.js';
+import { Worker } from "node:worker_threads";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import {
+  RiskInput,
+  RiskResult,
+  RiskScorer,
+} from "../../domain/services/risk-scorer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,19 +28,21 @@ export class RiskWorkerPool implements IRiskWorkerPool {
   private poolSize: number;
 
   constructor(poolSize?: number) {
-    this.poolSize = poolSize || Math.max(1, (os.availableParallelism?.() || os.cpus().length) - 1);
+    this.poolSize =
+      poolSize ||
+      Math.max(1, (os.availableParallelism?.() || os.cpus().length) - 1);
     this.initWorkers();
   }
 
   private initWorkers() {
-    let workerScript = path.join(__dirname, 'risk-worker.js');
+    let workerScript = path.join(__dirname, "risk-worker.js");
     let execArgv: string[] = [];
 
     if (!fs.existsSync(workerScript)) {
-      const tsScript = path.join(__dirname, 'risk-worker.ts');
+      const tsScript = path.join(__dirname, "risk-worker.ts");
       if (fs.existsSync(tsScript)) {
         workerScript = tsScript;
-        execArgv = ['--import', 'tsx'];
+        execArgv = ["--import", "tsx"];
       } else {
         return; // Fallback to inline
       }
@@ -95,12 +101,12 @@ export class RiskWorkerPool implements IRiskWorkerPool {
     };
 
     const cleanup = () => {
-      worker.off('message', onMessage);
-      worker.off('error', onError);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
     };
 
-    worker.on('message', onMessage);
-    worker.on('error', onError);
+    worker.on("message", onMessage);
+    worker.on("error", onError);
     worker.postMessage(task.items);
   }
 

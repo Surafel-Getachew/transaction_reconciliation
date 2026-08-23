@@ -1,5 +1,5 @@
-import { NewRejectionRecord } from '../../infrastructure/db/schema/rejections.js';
-import { NewTransactionRecord } from '../../infrastructure/db/schema/transactions.js';
+import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
+import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
 
 export interface ImportBatch {
   importId: string;
