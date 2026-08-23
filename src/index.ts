@@ -12,6 +12,7 @@ import { CreateImportUseCase } from "./application/use-cases/create-import.useca
 import { ImportController } from "./presentation/http/controllers/import.controller.js";
 import { createRouter } from "./presentation/http/routes.js";
 import { createApp } from "./presentation/server.js";
+import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
 import { ImportJobQueue } from "./application/queue/import-job-queue.js";
 dotenv.config();
 
@@ -25,6 +26,14 @@ async function main() {
     } catch (err) {
       console.warn("Migration auto-run warning:", err);
     }
+  }
+
+  // Job Recovery for stale/interrupted jobs
+  const jobRecovery = new JobRecoveryService(db);
+  try {
+    await jobRecovery.recoverStaleJobs();
+  } catch (err) {
+    console.warn("Job recovery warning:", err);
   }
 
   // 1. Infrastructure dependencies
