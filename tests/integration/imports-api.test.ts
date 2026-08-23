@@ -1,0 +1,203 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import request from 'supertest';
+import { db, pool } from '../../src/infrastructure/db/index.js';
+import { DrizzleImportRepository } from '../../src/infrastructure/repositories/drizzle-import-repository.js';
+import { DrizzleTransactionRepository } from '../../src/infrastructure/repositories/drizzle-transaction-repository.js';
+import { DrizzleRejectionRepository } from '../../src/infrastructure/repositories/drizzle-rejection-repository.js';
+import { DrizzleImportBatchPersister } from '../../src/infrastructure/repositories/drizzle-import-batch-persister.js';
+import { LocalFileStorage } from '../../src/infrastructure/storage/local-file-storage.js';
+import { RiskWorkerPool } from '../../src/infrastructure/workers/worker-pool.js';
+import { ImportProcessor } from '../../src/application/processor/import-processor.js';
+import { CreateImportUseCase } from '../../src/application/use-cases/create-import.usecase.js';
+import { GetImportStatusUseCase } from '../../src/application/use-cases/get-import-status.usecase.js';
+import { CancelImportUseCase } from '../../src/application/use-cases/cancel-import.usecase.js';
+import { GetSummaryUseCase } from '../../src/application/use-cases/get-summary.usecase.js';
+import { GetRejectionsUseCase } from '../../src/application/use-cases/get-rejections.usecase.js';
+import { ImportController } from '../../src/presentation/http/controllers/import.controller.js';
+import { createRouter } from '../../src/presentation/http/routes.js';
+import { createApp } from '../../src/presentation/server.js';
+import { runMigrations } from '../../src/infrastructure/db/migrate.js';
+import { imports, transactions, rejections, idempotencyKeys } from '../../src/infrastructure/db/schema/index.js';
+
+describe('Import & Reconciliation API Integration Tests', () => {
+  let app: any;
+  let workerPool: RiskWorkerPool;
+
+  beforeAll(async () => {
+    await runMigrations();
+
+    // Clean tables
+    await db.delete(transactions);
+    await db.delete(rejections);
+    await db.delete(idempotencyKeys);
+    await db.delete(imports);
+
+    const importRepo = new DrizzleImportRepository(db);
+    const transactionRepo = new DrizzleTransactionRepository(db);
+    const rejectionRepo = new DrizzleRejectionRepository(db);
+    const batchPersister = new DrizzleImportBatchPersister(db);
+    const fileStorage = new LocalFileStorage('./uploads_test');
+    workerPool = new RiskWorkerPool(1);
+
+    const processor = new ImportProcessor(
+      importRepo,
+      transactionRepo,
+      rejectionRepo,
+      fileStorage,
+      workerPool,
+      { batchSize: 10 },
+      batchPersister,
+    );
+
+    const createImportUseCase = new CreateImportUseCase(importRepo, fileStorage, processor);
+    const getImportStatusUseCase = new GetImportStatusUseCase(importRepo);
+    const cancelImportUseCase = new CancelImportUseCase(importRepo);
+    const getSummaryUseCase = new GetSummaryUseCase(transactionRepo);
+    const getRejectionsUseCase = new GetRejectionsUseCase(rejectionRepo, importRepo);
+
+    const controller = new ImportController(
+      createImportUseCase,
+      getImportStatusUseCase,
+      cancelImportUseCase,
+      getSummaryUseCase,
+      getRejectionsUseCase
+    );
+
+    const router = createRouter(controller);
+    app = createApp(router);
+  });
+
+  afterAll(async () => {
+    await workerPool?.destroy();
+    await pool.end();
+  });
+
+  it('GET /health/live and GET /health/ready should return 200', async () => {
+    const resLive = await request(app).get('/health/live');
+    expect(resLive.status).toBe(200);
+    expect(resLive.body.status).toBe('live');
+
+    const resReady = await request(app).get('/health/ready');
+    expect(resReady.status).toBe(200);
+    expect(resReady.body.status).toBe('ready');
+  });
+
+  it('POST /v1/imports without Idempotency-Key should return 400', async () => {
+    const res = await request(app).post('/v1/imports');
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_REQUIRED');
+  });
+
+  it('POST /v1/imports with valid NDJSON file should create import and process asynchronously', async () => {
+    const key = `idem-integration-${Date.now()}`;
+    const fileContent = [
+      JSON.stringify({
+        transactionId: 'tx-integ-1',
+        accountId: 'acc-1',
+        merchantId: 'mer-1',
+        amount: 250.5,
+        currency: 'USD',
+        timestamp: '2026-07-20T10:00:00.000Z',
+        description: 'Valid record 1',
+      }),
+      JSON.stringify({
+        transactionId: 'tx-integ-2',
+        accountId: 'acc-2',
+        merchantId: 'mer-1',
+        amount: 50.0,
+        currency: 'EUR',
+        timestamp: '2026-07-20T11:00:00.000Z',
+        description: 'Valid record 2',
+      }),
+      '{"invalid_json":', // Line 3: malformed JSON
+    ].join('\n');
+
+    const res = await request(app)
+      .post('/v1/imports')
+      .set('Idempotency-Key', key)
+      .set('X-Provider-Id', 'provider_1')
+      .attach('file', Buffer.from(fileContent), 'test.ndjson');
+
+    expect(res.status).toBe(202);
+    expect(res.body.id).toBeDefined();
+    expect(res.body.status).toBe('pending');
+
+    const importId = res.body.id;
+
+    // Poll status until completion
+    let attempts = 0;
+    let finalStatus: any;
+    while (attempts < 20) {
+      await new Promise((r) => setTimeout(r, 200));
+      const statusRes = await request(app).get(`/v1/imports/${importId}`);
+      if (statusRes.body.status === 'completed' || statusRes.body.status === 'failed') {
+        finalStatus = statusRes.body;
+        break;
+      }
+      attempts++;
+    }
+
+    expect(finalStatus.status).toBe('completed');
+    expect(finalStatus.progress.processed).toBe(3);
+    expect(finalStatus.progress.accepted).toBe(2);
+    expect(finalStatus.progress.rejected).toBe(1);
+
+    // Verify reconciliation summary
+    const summaryRes = await request(app).get(`/v1/imports/${importId}/summary`);
+    expect(summaryRes.status).toBe(200);
+    expect(summaryRes.body.totals.accepted).toBe(2);
+    expect(summaryRes.body.totals.rejected).toBe(1);
+    expect(summaryRes.body.byCurrency.length).toBe(2);
+
+    // Verify rejections pagination
+    const rejectionsRes = await request(app).get(`/v1/imports/${importId}/rejections?limit=10`);
+    expect(rejectionsRes.status).toBe(200);
+    expect(rejectionsRes.body.items.length).toBe(1);
+    expect(rejectionsRes.body.items[0].lineNumber).toBe(3);
+    expect(rejectionsRes.body.items[0].reason).toBe('INVALID_JSON');
+  });
+
+  it('POST /v1/imports with repeated Idempotency-Key should return existing import without duplicate processing', async () => {
+    const key = `idem-repeat-${Date.now()}`;
+    const fileContent = JSON.stringify({
+      transactionId: 'tx-repeat-1',
+      accountId: 'acc-1',
+      merchantId: 'mer-1',
+      amount: 100,
+      currency: 'USD',
+      timestamp: '2026-07-20T10:00:00.000Z',
+    }) + '\n';
+
+    const res1 = await request(app)
+      .post('/v1/imports')
+      .set('Idempotency-Key', key)
+      .attach('file', Buffer.from(fileContent), 'test.ndjson');
+
+    expect(res1.status).toBe(202);
+
+    const res2 = await request(app)
+      .post('/v1/imports')
+      .set('Idempotency-Key', key)
+      .attach('file', Buffer.from(fileContent), 'test.ndjson');
+
+    expect(res2.status).toBe(202);
+    expect(res2.body.id).toBe(res1.body.id);
+  });
+
+  it('handles concurrent requests with the same idempotency key atomically', async () => {
+    const key = `idem-concurrent-${Date.now()}`;
+    const fileContent = JSON.stringify({
+      transactionId: `tx-concurrent-${Date.now()}`,
+      accountId: 'acc-1', merchantId: 'mer-1', amount: 100, currency: 'USD',
+      timestamp: '2026-07-20T10:00:00.000Z',
+    }) + '\n';
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      request(app).post('/v1/imports').set('Idempotency-Key', key)
+        .attach('file', Buffer.from(fileContent), 'test.ndjson')
+    ));
+
+    expect(responses.every((response) => response.status === 202)).toBe(true);
+    expect(new Set(responses.map((response) => response.body.id)).size).toBe(1);
+  });
+});
