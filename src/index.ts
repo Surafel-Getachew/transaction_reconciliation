@@ -18,27 +18,30 @@ import { createRouter } from "./presentation/http/routes.js";
 import { createApp } from "./presentation/server.js";
 import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
 import { ImportJobQueue } from "./application/queue/import-job-queue.js";
+import { createLogger } from "./infrastructure/logging/pino-logger.js";
 
 dotenv.config();
 
+const logger = createLogger();
+
 async function main() {
-  console.log("Starting Transaction Import and Reconciliation Service...");
+  logger.info({}, "service_starting");
 
   // Auto-run migrations on startup if configured
   if (process.env.AUTO_MIGRATE !== "false") {
     try {
-      await runMigrations();
+      await runMigrations(logger);
     } catch (err) {
-      console.warn("Migration auto-run warning:", err);
+      logger.warn({ err }, "migrations_skipped");
     }
   }
 
   // Job Recovery for stale/interrupted jobs
-  const jobRecovery = new JobRecoveryService(db);
+  const jobRecovery = new JobRecoveryService(db, logger);
   try {
     await jobRecovery.recoverStaleJobs();
   } catch (err) {
-    console.warn("Job recovery warning:", err);
+    logger.warn({ err }, "stale_job_recovery_failed");
   }
 
   // 1. Infrastructure dependencies
@@ -66,6 +69,7 @@ async function main() {
         : 1000,
     },
     batchPersister,
+    logger,
   );
 
   const importQueue = new ImportJobQueue(
@@ -77,6 +81,7 @@ async function main() {
     process.env.MAX_PENDING_IMPORTS
       ? parseInt(process.env.MAX_PENDING_IMPORTS, 10)
       : 20,
+    logger,
   );
 
   const createImportUseCase = new CreateImportUseCase(
@@ -105,11 +110,11 @@ async function main() {
   );
 
   const router = createRouter(controller);
-  const app = createApp(router);
+  const app = createApp(router, logger);
 
   const port = parseInt(process.env.PORT || "3000", 10);
   const server = app.listen(port, () => {
-    console.log(`Server listening on port ${port}`);
+    logger.info({ port }, "server_listening");
   });
 
   // Graceful shutdown handling
@@ -119,25 +124,29 @@ async function main() {
     isShuttingDown = true;
     acceptingTraffic = false;
     importQueue.stopAccepting();
-    console.log(`Received ${signal}. Starting graceful shutdown...`);
+    const shutdownLog = logger.child({ signal, shutdownState: "draining" });
+    shutdownLog.info({ queueDepth: importQueue.depth }, "shutdown_started");
 
     // Force exit timeout
     const forceExitTimer = setTimeout(() => {
-      console.error("Graceful shutdown timeout exceeded. Exiting forcibly.");
+      shutdownLog.error(
+        { shutdownState: "grace_period_expired", queueDepth: importQueue.depth },
+        "shutdown_forced",
+      );
       process.exit(1);
     }, 10000);
 
     server.close(async () => {
-      console.log("HTTP server closed.");
+      shutdownLog.info({}, "http_server_closed");
       try {
         await importQueue.drain();
         await riskWorkerPool.destroy();
         await pool.end();
-        console.log("Database connections closed.");
+        shutdownLog.info({ shutdownState: "complete" }, "shutdown_completed");
         clearTimeout(forceExitTimer);
         process.exit(0);
       } catch (err) {
-        console.error("Error during shutdown:", err);
+        shutdownLog.error({ err, shutdownState: "failed" }, "shutdown_failed");
         clearTimeout(forceExitTimer);
         process.exit(1);
       }
@@ -149,6 +158,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Fatal initialization error:", err);
+  logger.error({ err }, "service_start_failed");
   process.exit(1);
 });

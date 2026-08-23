@@ -136,7 +136,9 @@ npm run test:all
 ## Observability
 
 ### Structured logging
-All logs are newline-delimited JSON via Pino (pretty-printed outside production). Every HTTP request carries a correlation id — taken from an inbound `X-Request-Id` when present, otherwise generated — which is echoed in the response header and included in every error envelope. Background work logs with `importId`, `providerId`, `batchNumber`, `component`, and `retryAttempt`. Transaction descriptions and file paths are redacted at the logger root, so uploaded content never reaches the log stream.
+All logs are newline-delimited JSON written to stdout via Pino. Every HTTP request carries a correlation id — taken from an inbound `X-Request-Id` when it is a safe short token, otherwise generated — which is echoed in the response header, included in every error envelope, and bound to a child logger for the life of the request. Background work logs with `importId`, `providerId`, `batchNumber`, `recordCount`, and `durationMs`; shutdown logs carry `signal` and `shutdownState`. Transaction descriptions and raw rejected values are redacted at the logger root, so uploaded content never reaches the log stream. Because every field is JSON-encoded, newlines in untrusted input cannot forge a log line.
+
+The logger is injected, not imported: application and domain code depends on the `ILogger` port in [src/domain/logging/logger.interface.ts](src/domain/logging/logger.interface.ts), the Pino adapter lives in [src/infrastructure/logging/pino-logger.ts](src/infrastructure/logging/pino-logger.ts), and the two are wired together only in [src/index.ts](src/index.ts). Components default to a silent logger so tests stay quiet without stubbing.
 
 Set `LOG_LEVEL=debug` to add per-batch records (scoring duration, commit duration, per-batch counts).
 

@@ -16,6 +16,7 @@ import { NewTransactionRecord } from "../../infrastructure/db/schema/transaction
 import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
 import { MetricsMonitor } from "../../infrastructure/metrics/metrics-monitor.js";
 import { IImportBatchPersister } from "../../domain/repositories/import-batch-persister.interface.js";
+import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
 
 export interface ImportProcessorOptions {
   batchSize?: number;
@@ -37,6 +38,7 @@ export class ImportProcessor {
     private riskWorkerPool: IRiskWorkerPool,
     options?: ImportProcessorOptions,
     private batchPersister?: IImportBatchPersister,
+    private logger: ILogger = silentLogger,
   ) {
     this.batchSize = options?.batchSize || 1000;
     this.maxLineLength = options?.maxLineLength || 1000000;
@@ -97,7 +99,12 @@ export class ImportProcessor {
     const metrics = MetricsMonitor.getInstance();
     metrics.incrementActiveImports();
 
+    const log = this.logger.child({ importId, providerId });
+    const startedAt = Date.now();
+    let batchNumber = 0;
+
     await this.importRepo.markStarted(importId);
+    log.info({ batchSize: this.batchSize }, "import_started");
 
     const readStream = this.fileStorage.getReadStream(filePath);
     const rl = readline.createInterface({
@@ -176,6 +183,8 @@ export class ImportProcessor {
             providerId,
             pendingValid,
             pendingRejections,
+            log,
+            ++batchNumber,
           );
           pendingValid = [];
           pendingRejections = [];
@@ -196,6 +205,8 @@ export class ImportProcessor {
           providerId,
           pendingValid,
           pendingRejections,
+          log,
+          ++batchNumber,
         );
         pendingValid = [];
         pendingRejections = [];
@@ -204,19 +215,35 @@ export class ImportProcessor {
 
       // Check final status
       const finalState = await this.importRepo.findById(importId);
-      if (
-        finalState?.status === "cancelling" ||
-        finalState?.status === "cancelled"
-      ) {
-        await this.importRepo.markCompleted(importId, "cancelled");
-      } else {
-        await this.importRepo.markCompleted(importId, "completed");
-      }
+      const finalStatus =
+        finalState?.status === "cancelling" || finalState?.status === "cancelled"
+          ? "cancelled"
+          : "completed";
+      await this.importRepo.markCompleted(importId, finalStatus);
+      log.info(
+        {
+          status: finalStatus,
+          batchCount: batchNumber,
+          recordCount: lineNumber,
+          durationMs: Date.now() - startedAt,
+        },
+        "import_finished",
+      );
     } catch (error: any) {
       await this.importRepo.markCompleted(
         importId,
         "failed",
         error?.message || "Processing error",
+      );
+      log.error(
+        {
+          err: error,
+          errorCode: error?.code,
+          batchCount: batchNumber,
+          recordCount: lineNumber,
+          durationMs: Date.now() - startedAt,
+        },
+        "import_failed",
       );
     } finally {
       this.currentActiveImports = Math.max(0, this.currentActiveImports - 1);
@@ -233,15 +260,19 @@ export class ImportProcessor {
       fingerprint: string;
     }>,
     rejectionItems: NewRejectionRecord[],
+    log: ILogger,
+    batchNumber: number,
   ): Promise<boolean> {
     const currentImport = await this.importRepo.findById(importId);
     if (
       currentImport?.status === "cancelling" ||
       currentImport?.status === "cancelled"
     ) {
+      log.info({ batchNumber, status: currentImport.status }, "batch_skipped");
       return true;
     }
 
+    const startedAt = Date.now();
     let insertedCount = 0;
     let duplicateCount = 0;
 
@@ -325,6 +356,18 @@ export class ImportProcessor {
       acceptedDelta,
       rejectedDelta,
       duplicateDelta,
+    );
+
+    log.debug(
+      {
+        batchNumber,
+        recordCount: processedDelta,
+        accepted: acceptedDelta,
+        rejected: rejectedDelta,
+        duplicates: duplicateDelta,
+        durationMs: Date.now() - startedAt,
+      },
+      "batch_persisted",
     );
 
     return false;

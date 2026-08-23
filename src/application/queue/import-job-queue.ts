@@ -1,3 +1,5 @@
+import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
+
 export interface ImportJob {
   importId: string;
   filePath: string;
@@ -28,6 +30,7 @@ export class ImportJobQueue implements IImportJobQueue {
     private readonly process: (job: ImportJob) => Promise<void>,
     private readonly concurrency = 2,
     private readonly maxPending = 20,
+    private readonly logger: ILogger = silentLogger,
   ) {}
 
   get depth(): number {
@@ -72,7 +75,10 @@ export class ImportJobQueue implements IImportJobQueue {
       this.active++;
       void this.process(job)
         .catch((error) =>
-          console.error(`Import ${job.importId} failed:`, error),
+          this.logger.error(
+            { importId: job.importId, err: error, queueDepth: this.depth },
+            "import_job_failed",
+          ),
         )
         .finally(() => {
           this.active--;

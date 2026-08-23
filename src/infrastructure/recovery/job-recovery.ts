@@ -1,9 +1,13 @@
 import { eq, inArray } from 'drizzle-orm';
 import { Database } from '../db/index.js';
 import { imports } from '../db/schema/imports.js';
+import { ILogger, silentLogger } from '../../domain/logging/logger.interface.js';
 
 export class JobRecoveryService {
-  constructor(private db: Database) {}
+  constructor(
+    private db: Database,
+    private logger: ILogger = silentLogger,
+  ) {}
 
   async recoverStaleJobs(): Promise<number> {
     const staleJobs = await this.db
@@ -15,7 +19,7 @@ export class JobRecoveryService {
       return 0;
     }
 
-    console.log(`Found ${staleJobs.length} stale job(s) from previous run. Recovering...`);
+    this.logger.warn({ staleJobCount: staleJobs.length }, 'stale_jobs_recovering');
 
     for (const job of staleJobs) {
       const newStatus = job.status === 'cancelling' ? 'cancelled' : 'failed';
