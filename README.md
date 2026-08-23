@@ -54,7 +54,7 @@ npm start
 
 The API server will listen on `http://localhost:3000`.
 
-Interactive API documentation is available at **`http://localhost:3000/docs`** (Swagger UI), with the raw specification at `/openapi.json`.
+Interactive API documentation is available at **`http://localhost:3000/docs`** (Swagger UI).
 
 ---
 
@@ -107,7 +107,6 @@ npm run test:all
 | `GET` | `/health/ready` | Database readiness check |
 | `GET` | `/metrics` | Prometheus metrics endpoint (event loop delay, memory, CPU, counters) |
 | `GET` | `/docs` | Swagger UI for interactive API exploration |
-| `GET` | `/openapi.json` | OpenAPI 3.0 specification |
 
 ---
 

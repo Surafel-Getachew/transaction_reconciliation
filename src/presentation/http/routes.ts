@@ -1,7 +1,9 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
+import swaggerUi from "swagger-ui-express";
 import { ImportController } from "./controllers/import.controller.js";
+import { openApiDocument } from "./openapi.js";
 
 const upload = multer({
   dest: process.env.TEMP_UPLOAD_DIR || "./uploads",
@@ -26,6 +28,16 @@ const upload = multer({
 
 export function createRouter(controller: ImportController): Router {
   const router = Router();
+
+  router.get("/", (_req, res) => res.redirect("/docs"));
+  router.use(
+    "/docs",
+    swaggerUi.serve,
+    swaggerUi.setup(openApiDocument as unknown as swaggerUi.JsonObject, {
+      customSiteTitle: "Transaction Import & Reconciliation API",
+      swaggerOptions: { displayRequestDuration: true, tryItOutEnabled: true },
+    }),
+  );
 
   // Health & Metrics
   router.get("/health/live", controller.getLiveness);
