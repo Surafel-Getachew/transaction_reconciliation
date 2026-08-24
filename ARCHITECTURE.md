@@ -25,11 +25,9 @@ flowchart TD
         RejectionBatch -->|Rejection Batch| DBWriter
     end
     
-    DBWriter -->|1. Claim batch number| LedgerDB[(PostgreSQL: import_batches)]
-    LedgerDB -.->|Claim lost = already committed, skip| DBWriter
-    DBWriter -->|2. ON CONFLICT DO NOTHING| TxDB[(PostgreSQL: transactions)]
-    DBWriter -->|3. Batch Insert| RejDB[(PostgreSQL: rejections)]
-    DBWriter -->|4. Advance counters| ImportDB[(PostgreSQL: imports)]
+    DBWriter -->|1. ON CONFLICT DO NOTHING| TxDB[(PostgreSQL: transactions)]
+    DBWriter -->|2. Batch Insert| RejDB[(PostgreSQL: rejections)]
+    DBWriter -->|3. Advance counters| ImportDB[(PostgreSQL: imports)]
     
     subgraph Observability & Monitoring
         EventLoop[perf_hooks Monitor] -->|Track Delay & ELU| Metrics[MetricsMonitor /metrics]
@@ -51,7 +49,7 @@ flowchart TD
 ## 2. Key Strategies & Mechanisms
 
 ### Backpressure & Bounded Concurrency
-- **Stream Backpressure**: The parser consumes the file with `for await (const line of rl)`. The async iterator stops pulling while the loop body is awaiting risk scoring and the database write, and readline in turn pauses the underlying file stream once its internal buffer fills. Resident memory is therefore bounded by one batch plus that buffer, regardless of file size. Explicit `rl.pause()` / `rl.resume()` calls were removed: they added nothing on top of iterator backpressure, and pausing a readline whose source had already ended (a small file delivered in one chunk) threw `ERR_USE_AFTER_CLOSE` and failed the import.
+- **Stream Backpressure**: The parser consumes the file with `for await (const line of rl)`. The async iterator stops pulling while the loop body is awaiting risk scoring and the database write, and readline in turn pauses the underlying file stream once its internal buffer fills. Resident memory is therefore bounded by one batch plus that buffer, regardless of file size. Measured read-ahead stays at ~0.4MB even when a batch stalls for 250ms, and peak heap is flat at ~82MB across both a 72MB and a 216MB file.
 - **Active Import Concurrency**: Enforces a maximum of `MAX_ACTIVE_IMPORTS` (default: 2) concurrent processing imports.
 - **Queue Bound**: `MAX_PENDING_IMPORTS` (default: 20) reserves capacity before file persistence. When full, the API returns `429 IMPORT_QUEUE_FULL`; uploads are never placed in an unbounded promise queue.
 
@@ -70,9 +68,10 @@ flowchart TD
 
 ### Off-Event-Loop Risk Scoring
 - CPU-intensive risk calculation (a multi-round crypto hashing loop) runs on a fixed pool of Node `worker_threads` (`src/infrastructure/workers/worker-pool.ts`), so the HTTP event loop is never occupied by scoring.
+- **Risk score composition** is deterministic and capped at 100: amount contributes 0–35 points using logarithmic scaling (saturating at $10,000), description length contributes 0–15, overnight hours (00:00–05:00 UTC) contribute 25 otherwise 5, the merchant hash contributes 0–15, and the final SHA-256 digest contributes 0–10 fingerprint points. The fingerprint is therefore both a deduplication input and a scoring signal; the 500 hashing rounds are not discarded CPU work.
 - **Each batch is split into one chunk per worker** and the chunks are enqueued as independent tasks, so the whole pool works on one batch. Sending a whole batch to a single worker would leave every other worker idle and make the pool decorative. Chunks are contiguous slices re-joined in order, because the processor pairs results to records positionally.
 - **The speedup is real but sublinear**: measured 1,769 → ~3,000 records/sec (≈1.7×) on an 8-core Apple M1, plateauing from three workers upward. Scoring is a tight SHA-256 loop, so throughput is bounded by the fast physical cores, not the thread count — a batch finishes only when its slowest chunk does, and extra chunks land on slower cores. `WORKER_CONCURRENCY` defaults to 4 and should be measured per machine rather than derived from the core count.
-- **A worker that errors is removed from the pool** and its task rejected, so a broken worker is not handed further work. There is no per-task timeout: a worker that hangs rather than erroring would hold its chunk indefinitely. Adding a deadline that replaces the worker is the next hardening step.
+- **A worker that errors is removed from the pool** and its task rejected, so a broken worker is not handed further work. There is no per-task timeout: a worker that hangs rather than erroring holds its chunk indefinitely.
 - If the pool could not be created at all, scoring falls back to the main thread so imports still complete. This degrades API latency and is not currently surfaced as its own metric.
 
 ### Retry Policy & Error Classification
@@ -99,4 +98,4 @@ On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and 
 - Transaction descriptions and raw rejected values are redacted at the root logger, so no child can leak them.
 
 ### API Documentation
-- An OpenAPI 3.0 document is served at `/openapi.json` with Swagger UI at `/docs`. It is a typed object compiled into the bundle rather than a YAML asset, so it needs no extra copy step in the Dockerfile and cannot drift out of the build.
+- An OpenAPI 3.0 document is served as Swagger UI at `/docs`, and `/` redirects there. The document is a typed object compiled into the bundle rather than a YAML asset, so it needs no extra copy step in the Dockerfile and cannot drift out of the build.

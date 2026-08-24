@@ -173,9 +173,9 @@ export class ImportProcessor {
 
         pendingValid.push({ normalized, fingerprint });
 
-        // Stream Backpressure: Pause stream reading while processing & persisting batch
+        // Awaiting here is the backpressure: the async iterator stops pulling
+        // lines, and readline pauses the file stream once its buffer fills.
         if (pendingValid.length + pendingRejections.length >= this.batchSize) {
-          rl.pause();
           metrics.setQueueDepth(pendingValid.length + pendingRejections.length);
 
           const isCancelled = await this.flushBatch(
@@ -194,7 +194,6 @@ export class ImportProcessor {
             rl.close();
             break;
           }
-          rl.resume();
         }
       }
 

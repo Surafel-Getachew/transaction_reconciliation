@@ -53,7 +53,7 @@ Throughout the run the API was polled once per second across four endpoints (528
 
 The **4-second maximum** is honest and worth explaining rather than hiding: it occurs at the start, while the 100 MB multipart upload is being received and streamed to disk by the same process. That is I/O and stream plumbing on the main thread, not scoring. It affects the upload window only; once processing begins, latency settles back to single-digit milliseconds. Moving uploads behind a reverse proxy, or accepting them on a separate process, would remove it.
 
-### 2. Worker Pool Utilization — the change that mattered
+### 2. Worker Pool Utilization
 Sampling `app_risk_workers{state="busy"}` once per second across 182 samples:
 
 | Workers busy | Samples |
@@ -62,13 +62,13 @@ Sampling `app_risk_workers{state="busy"}` once per second across 182 samples:
 | 1–5 | 29 |
 | 0 | 73 |
 
-Previously each batch was posted to a **single** worker while the rest of the pool sat idle, so the pool was decorative and throughput was capped by one thread. Splitting each batch into one chunk per worker is what puts the pool to work.
+Each batch is split into one chunk per worker so the whole pool works on it. Posting a batch to a single worker would cap throughput at one thread regardless of pool size.
 
-Isolated pool measurement on an 8-core Apple M1 (2,000 records per batch, median of 3 runs), which is what motivated the change and the `WORKER_CONCURRENCY` default of 4:
+Isolated pool measurement on an 8-core Apple M1 (2,000 records per batch, median of 3 runs), which is the basis for the `WORKER_CONCURRENCY` default of 4:
 
 | Pool size | Throughput | 500k records |
 | :--- | :--- | :--- |
-| 1 (equivalent to the old behaviour) | 1,769 rec/s | ~283 s |
+| 1 | 1,769 rec/s | ~283 s |
 | 2 | 2,354 rec/s | ~212 s |
 | 3 | 3,363 rec/s | ~149 s |
 | 4 (default) | 3,039 rec/s | ~165 s |
@@ -77,7 +77,7 @@ Isolated pool measurement on an 8-core Apple M1 (2,000 records per batch, median
 
 The speedup is **~1.7×, not ~4×**, and it plateaus from three workers upward. Scoring is a tight SHA-256 loop, so it is bounded by the fast physical cores rather than the thread count: a batch completes only when its slowest chunk does, and on an M1 the extra chunks land on efficiency cores. Raising `WORKER_CONCURRENCY` past the plateau buys nothing and costs one V8 isolate per thread. The number is machine-specific — measure before changing it.
 
-The `0` samples are not idleness — they are the database-write phase of the batch cycle, which is now the limiting factor.
+The `0` samples are not idleness — they are the database-write phase of the batch cycle, which is the limiting factor.
 
 ### 3. Memory Behavior
 Peak heap stayed at **98.5 MB** across a 100 MB file — resident memory does not track file size, confirming the file is genuinely streamed. Backpressure comes from `for await (const line of rl)`: the async iterator stops pulling while the loop body awaits scoring and the database write, so only one batch plus readline's internal buffer is ever live.

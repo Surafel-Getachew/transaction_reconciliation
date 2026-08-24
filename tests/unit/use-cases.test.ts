@@ -127,6 +127,50 @@ describe('Use Cases (with In-Memory Fake Dependencies)', () => {
     expect(rejections.items[1].reason).toBe('INVALID_AMOUNT');
   });
 
+  it('ImportProcessor should complete when a batch boundary falls after the stream ends', async () => {
+    // Regression: the stream is delivered in one chunk, so readline has already
+    // closed by the time the batch flush resolves.
+    const smallBatchProcessor = new ImportProcessor(
+      importRepo,
+      transactionRepo,
+      rejectionRepo,
+      fileStorage,
+      workerPool,
+      { batchSize: 2 }
+    );
+
+    const ndjsonContent = [1, 2, 3]
+      .map((n) =>
+        JSON.stringify({
+          transactionId: `txn-${n}`,
+          accountId: 'acc-1',
+          merchantId: 'mer-1',
+          amount: 100,
+          currency: 'USD',
+          timestamp: '2026-07-20T10:00:00.000Z',
+        })
+      )
+      .join('\n');
+
+    const created = await new CreateImportUseCase(
+      importRepo,
+      fileStorage,
+      smallBatchProcessor
+    ).execute({
+      idempotencyKey: 'test-batch-boundary-key',
+      fileStream: Readable.from([ndjsonContent]),
+    });
+
+    const importId = created.importRecord.id;
+    const filePath = Array.from(fileStorage.files.keys())[0];
+    await smallBatchProcessor.processImport(importId, filePath, 'default_provider');
+
+    const status = await new GetImportStatusUseCase(importRepo).execute(importId);
+    expect(status.status).toBe('completed');
+    expect(status.failureReason).toBeNull();
+    expect(status.progress.accepted).toBe(3);
+  });
+
   it('CancelImportUseCase should transition import status to cancelling', async () => {
     const createUseCase = new CreateImportUseCase(importRepo, fileStorage, processor);
     const cancelUseCase = new CancelImportUseCase(importRepo);
