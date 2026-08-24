@@ -54,8 +54,10 @@ export function errorHandler(
     uploadError?.code ??
     (isBodyTooLarge
       ? "REQUEST_BODY_TOO_LARGE"
-      : err.code ||
-        (statusCode >= 500 ? "INTERNAL_SERVER_ERROR" : "BAD_REQUEST"));
+      : statusCode >= 500
+        ? // don't surface a driver code such as a SQLSTATE to the client
+          "INTERNAL_SERVER_ERROR"
+        : err.code || "BAD_REQUEST");
   const safeMessage =
     statusCode >= 500
       ? "An unexpected error occurred"

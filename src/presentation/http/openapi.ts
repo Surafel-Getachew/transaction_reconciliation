@@ -485,7 +485,9 @@ export const openApiDocument = {
           failureReason: {
             type: "string",
             nullable: true,
-            description: "Set only when status is `failed`.",
+            description:
+              "Set only when status is `failed`. A fixed safe phrase chosen from a known set — never the underlying driver message, which can contain SQL and schema names.",
+            example: "Processing results could not be saved",
           },
         },
       },

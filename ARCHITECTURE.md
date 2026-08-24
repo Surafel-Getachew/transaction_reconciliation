@@ -91,6 +91,11 @@ flowchart TD
 - **After the final attempt** the error propagates out of `persist()` to `ImportProcessor`, which marks the import `failed` with a non-sensitive reason and logs `import_failed` with the error. The raw error stays in the logs and never reaches the client.
 - Retries are **cancellable**: the policy accepts an `AbortSignal`, stops retrying once it is aborted, and interrupts the backoff sleep. The composition root wires this to the shutdown controller, so `SIGTERM` does not wait out a long backoff.
 
+### Error Exposure
+- **A failed import stores a classified reason, never the underlying error text.** Database drivers put schema in `error.message` — PostgreSQL returns strings such as `null value in column "secret_col" of relation "acct" violates not-null constraint` and `syntax error at or near "FRM"`. Since `GET /v1/imports/:id` returns `failureReason` verbatim, writing that through would publish constraint names, column names, and SQL fragments.
+- `classifyImportFailure` maps an error to one of `STORAGE_READ_FAILED`, `PERSISTENCE_FAILED`, `CANCELLED`, or `PROCESSING_FAILED` by inspecting error *shape* — SQLSTATE pattern, `severity` field, filesystem errno — and returns a fixed phrase. The classified code and the full error, stack included, go to the log instead.
+- The HTTP error handler applies the same rule: any 5xx reports `INTERNAL_SERVER_ERROR`, so a driver code such as `23505` cannot become the public error code.
+
 ### Graceful Shutdown & Job Recovery
 On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and fails readiness (so a load balancer drains it) → signals in-flight imports to stop at their **next batch boundary** → closes the HTTP server → drains the import queue → drains and terminates the worker pool → closes the database pool → flushes logs and exits.
 

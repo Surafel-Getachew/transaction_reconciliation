@@ -23,6 +23,7 @@ import {
 import { IClock, systemClock } from "../../domain/time/clock.interface.js";
 import { IIdGenerator } from "../../domain/ids/id-generator.interface.js";
 import { LineLengthLimiter } from "../../domain/services/line-length-limiter.js";
+import { classifyImportFailure } from "../../domain/errors/import-failure.js";
 
 export interface ImportProcessorOptions {
   batchSize?: number;
@@ -235,14 +236,14 @@ export class ImportProcessor {
         "import_finished",
       );
     } catch (error: any) {
-      await this.importRepo.markCompleted(
-        importId,
-        "failed",
-        error?.message || "Processing error",
-      );
+      // The driver's message can carry SQL and schema names, so only the
+      // classified reason is persisted; the original error stays in the log.
+      const failure = classifyImportFailure(error);
+      await this.importRepo.markCompleted(importId, "failed", failure.reason);
       log.error(
         {
           err: error,
+          failureCode: failure.code,
           errorCode: error?.code,
           batchCount: batchNumber,
           recordCount: lineNumber,
