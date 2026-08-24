@@ -14,7 +14,10 @@ import { FingerprintCalculator } from "../../domain/services/fingerprint.js";
 import { RiskInput } from "../../domain/services/risk-scorer.js";
 import { NewTransaction } from "../../domain/entities/transaction.entity.js";
 import { NewRejection } from "../../domain/entities/rejection.entity.js";
-import { IImportBatchPersister } from "../../domain/repositories/import-batch-persister.interface.js";
+import {
+  IImportBatchPersister,
+  PendingTransaction,
+} from "../../domain/repositories/import-batch-persister.interface.js";
 import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
 import {
   IMetricsRecorder,
@@ -121,6 +124,7 @@ export class ImportProcessor {
     let pendingValid: Array<{
       normalized: NormalizedTransaction;
       fingerprint: string;
+      lineNumber: number;
     }> = [];
     let pendingRejections: NewRejection[] = [];
 
@@ -178,7 +182,7 @@ export class ImportProcessor {
         const normalized = TransactionNormalizer.normalize(validation.data!);
         const fingerprint = FingerprintCalculator.calculate(normalized);
 
-        pendingValid.push({ normalized, fingerprint });
+        pendingValid.push({ normalized, fingerprint, lineNumber });
 
         // Awaiting here is the backpressure: the async iterator stops pulling
         // lines, and readline pauses the file stream once its buffer fills.
@@ -263,6 +267,7 @@ export class ImportProcessor {
     validItems: Array<{
       normalized: NormalizedTransaction;
       fingerprint: string;
+      lineNumber: number;
     }>,
     rejectionItems: NewRejection[],
     log: ILogger,
@@ -280,6 +285,7 @@ export class ImportProcessor {
     const startedAt = this.clock.now().getTime();
     let insertedCount = 0;
     let duplicateCount = 0;
+    let conflictCount = 0;
 
     if (validItems.length > 0) {
       // Worker pool risk score calculation
@@ -296,7 +302,7 @@ export class ImportProcessor {
 
       const riskResults = await this.riskWorkerPool.processBatch(riskInputs);
 
-      const txRecords: NewTransaction[] = validItems.map((item, idx) => {
+      const txRecords: PendingTransaction[] = validItems.map((item, idx) => {
         const risk = riskResults[idx] || { riskScore: 0, riskLevel: "low" };
         return {
           id: this.ids.generate(),
@@ -312,6 +318,7 @@ export class ImportProcessor {
           fingerprint: item.fingerprint,
           riskScore: risk.riskScore,
           riskLevel: risk.riskLevel,
+          lineNumber: item.lineNumber,
         };
       });
 
@@ -323,6 +330,7 @@ export class ImportProcessor {
         });
         insertedCount = insertResult.insertedCount;
         duplicateCount = insertResult.duplicateCount;
+        conflictCount = insertResult.conflictCount;
       } else {
         const insertResult = await this.transactionRepo.batchInsert(txRecords);
         insertedCount = insertResult.insertedCount;
@@ -344,7 +352,7 @@ export class ImportProcessor {
 
     const processedDelta = validItems.length + rejectionItems.length;
     const acceptedDelta = insertedCount;
-    const rejectedDelta = rejectionItems.length;
+    const rejectedDelta = rejectionItems.length + conflictCount;
     const duplicateDelta = duplicateCount;
 
     if (!this.batchPersister) {

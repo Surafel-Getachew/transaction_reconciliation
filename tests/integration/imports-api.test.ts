@@ -157,6 +157,12 @@ describe('Import & Reconciliation API Integration Tests', () => {
     expect(summaryRes.body.totals.accepted).toBe(2);
     expect(summaryRes.body.totals.rejected).toBe(1);
     expect(summaryRes.body.byCurrency.length).toBe(2);
+    // merchant/account breakdowns are capped top-N, ranked by total amount
+    expect(summaryRes.body.byMerchant.length).toBe(1);
+    expect(summaryRes.body.byAccount.length).toBe(2);
+    expect(summaryRes.body.byAccount[0].totalAmount).toBeGreaterThanOrEqual(
+      summaryRes.body.byAccount[1].totalAmount
+    );
 
     // Verify rejections pagination
     const rejectionsRes = await request(app).get(`/v1/imports/${importId}/rejections?limit=10`);
@@ -208,6 +214,99 @@ describe('Import & Reconciliation API Integration Tests', () => {
 
     expect(responses.every((response) => response.status === 202)).toBe(true);
     expect(new Set(responses.map((response) => response.body.id)).size).toBe(1);
+  });
+
+
+  it('records a rejection when a duplicate transaction id carries different content', async () => {
+    const sharedTxnId = `tx-conflict-${Date.now()}`;
+    const original = {
+      transactionId: sharedTxnId,
+      accountId: 'acc-original',
+      merchantId: 'mer-original',
+      amount: 100,
+      currency: 'USD',
+      timestamp: '2026-07-20T10:00:00.000Z',
+    };
+    // same id, entirely different content — first write must win, visibly
+    const conflicting = {
+      ...original,
+      accountId: 'acc-attacker',
+      merchantId: 'mer-attacker',
+      amount: 999999,
+      currency: 'JPY',
+    };
+
+    const upload = async (key: string, record: object) => {
+      const res = await request(app)
+        .post('/v1/imports')
+        .set('Idempotency-Key', key)
+        .set('X-Provider-Id', 'conflict-provider')
+        .attach('file', Buffer.from(JSON.stringify(record) + '\n'), 'c.ndjson');
+      expect(res.status).toBe(202);
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const status = await request(app).get(`/v1/imports/${res.body.id}`);
+        if (['completed', 'failed'].includes(status.body.status)) return status.body;
+      }
+      throw new Error('import did not settle');
+    };
+
+    const first = await upload(`conflict-a-${Date.now()}`, original);
+    expect(first.progress.accepted).toBe(1);
+
+    const second = await upload(`conflict-b-${Date.now()}`, conflicting);
+    expect(second.progress.accepted).toBe(0);
+    // counted as rejected rather than silently swallowed as a duplicate
+    expect(second.progress.rejected).toBe(1);
+    expect(second.progress.duplicates).toBe(0);
+    expect(
+      second.progress.accepted + second.progress.rejected + second.progress.duplicates
+    ).toBe(second.progress.processed);
+
+    const rejections = await request(app).get(`/v1/imports/${second.id}/rejections`);
+    expect(rejections.body.items).toHaveLength(1);
+    expect(rejections.body.items[0].reason).toBe('DUPLICATE_CONTENT_MISMATCH');
+    expect(rejections.body.items[0].lineNumber).toBe(1);
+    expect(rejections.body.items[0].rawValue.transactionId).toBe(sharedTxnId);
+
+    // first write wins: the stored row is untouched
+    const [stored] = await db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.transactionId, sharedTxnId));
+    expect(stored.accountId).toBe('acc-original');
+    expect(stored.currency).toBe('USD');
+  });
+
+  it('treats an identical re-submission as a duplicate, not a conflict', async () => {
+    const record = {
+      transactionId: `tx-replay-${Date.now()}`,
+      accountId: 'acc-1',
+      merchantId: 'mer-1',
+      amount: 42.5,
+      currency: 'USD',
+      timestamp: '2026-07-20T10:00:00.000Z',
+    };
+
+    const upload = async (key: string) => {
+      const res = await request(app)
+        .post('/v1/imports')
+        .set('Idempotency-Key', key)
+        .set('X-Provider-Id', 'replay-provider')
+        .attach('file', Buffer.from(JSON.stringify(record) + '\n'), 'r.ndjson');
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const status = await request(app).get(`/v1/imports/${res.body.id}`);
+        if (['completed', 'failed'].includes(status.body.status)) return status.body;
+      }
+      throw new Error('import did not settle');
+    };
+
+    await upload(`replay-a-${Date.now()}`);
+    const second = await upload(`replay-b-${Date.now()}`);
+
+    expect(second.progress.duplicates).toBe(1);
+    expect(second.progress.rejected).toBe(0);
   });
 
   it('job recovery reclaims only imports whose lease has expired', async () => {

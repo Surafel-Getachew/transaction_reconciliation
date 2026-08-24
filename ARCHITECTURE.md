@@ -68,6 +68,10 @@ flowchart TD
 ### Idempotency & Duplicate Prevention
 - **Import Creation Idempotency**: DB table `idempotency_keys` with unique primary key `key`. A PostgreSQL transaction-scoped advisory lock keyed by `Idempotency-Key` makes the check/create sequence safe under concurrent requests.
 - **Transaction Duplicate Prevention**: PostgreSQL unique index `UNIQUE (provider_id, transaction_id)` enforces duplicate prevention across files, imports, process restarts, and concurrent workers using `ON CONFLICT DO NOTHING`.
+- **Same id, different content: first write wins, and the discrepancy is recorded.** On conflict the batch persister reads the stored fingerprint for the conflicting ids and compares it with the incoming one, in the same transaction as the insert. An identical re-submission counts as a `duplicate` and nothing more. A conflict whose fingerprint differs — the same `transactionId` arriving with a different amount, account, or currency — is written to `rejections` with reason `DUPLICATE_CONTENT_MISMATCH`, carrying its line number and the offending `transactionId`. The stored row is never overwritten.
+- This is also the only thing the fingerprint is *read* for: it is what distinguishes a harmless replay from a genuine content conflict.
+- **Counter semantics follow from that split.** A conflict is counted as `rejected`, not as a `duplicate`, so `accepted + rejected + duplicates == processed` still holds exactly and the `rejections` table stays consistent with `rejectedCount`. `duplicates` therefore means "same id, same content". Counting a conflict as both would double-count it against `processed`; leaving it out of both would return rows from `/rejections` that no counter accounts for.
+- The comparison costs one indexed `SELECT` per batch, issued only when a batch actually had conflicts.
 
 ### Upload Validation
 - **The filename and the client MIME type are never the basis for acceptance.** The `.ndjson` extension check in the multer `fileFilter` is only a cheap early gate that avoids spooling an obviously wrong 500MB body to disk; it is not the security boundary.

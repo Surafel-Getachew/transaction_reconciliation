@@ -466,7 +466,7 @@ export const openApiDocument = {
               duplicates: {
                 type: "integer",
                 description:
-                  "Records skipped because the transaction id was already accepted for this provider.",
+                  "Records skipped because the transaction id was already accepted for this provider with identical content. A conflicting id whose content differs is counted under `rejected` with reason DUPLICATE_CONTENT_MISMATCH.",
               },
             },
           },
@@ -590,7 +590,8 @@ export const openApiDocument = {
           },
           reason: {
             type: "string",
-            description: "Stable machine-readable rejection code.",
+            description:
+              "Stable machine-readable rejection code. `DUPLICATE_CONTENT_MISMATCH` means the same transactionId was already accepted for this provider with different content; the existing record was kept and this one discarded.",
             example: "INVALID_CURRENCY",
           },
           message: {

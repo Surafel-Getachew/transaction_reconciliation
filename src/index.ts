@@ -79,6 +79,7 @@ async function main() {
     db,
     retryPolicy,
     LEASE_TTL_MS,
+    nanoIdGenerator,
   );
   const fileStorage = new LocalFileStorage(process.env.TEMP_UPLOAD_DIR);
   const riskWorkerPool = new RiskWorkerPool();
