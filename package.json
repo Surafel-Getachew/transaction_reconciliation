@@ -15,7 +15,8 @@
     "benchmark": "tsx scripts/run-benchmark.ts",
     "test": "vitest run --dir tests/unit",
     "test:integration": "vitest run --dir tests/integration",
-    "test:all": "vitest run"
+    "test:all": "vitest run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "cors": "^2.8.5",

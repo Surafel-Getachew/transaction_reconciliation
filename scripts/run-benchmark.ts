@@ -76,7 +76,7 @@ async function runBenchmark() {
     process.exit(1);
   }
 
-  const uploadJson = await uploadRes.json();
+  const uploadJson = (await uploadRes.json()) as { id: string; status: string };
   const importId = uploadJson.id;
   console.log(`Import created with ID: ${importId}. Status: ${uploadJson.status}`);
 

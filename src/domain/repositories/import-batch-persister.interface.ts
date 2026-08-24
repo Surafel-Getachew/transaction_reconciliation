@@ -1,10 +1,10 @@
-import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
-import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
+import { NewRejection } from "../entities/rejection.entity.js";
+import { NewTransaction } from "../entities/transaction.entity.js";
 
 export interface ImportBatch {
   importId: string;
-  transactions: NewTransactionRecord[];
-  rejections: NewRejectionRecord[];
+  transactions: NewTransaction[];
+  rejections: NewRejection[];
 }
 
 export interface BatchPersistResult {

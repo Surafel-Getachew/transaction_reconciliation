@@ -41,8 +41,15 @@ flowchart TD
 
 - **Presentation Layer (`src/presentation/`)**: Express controllers, routes, request validation, Multer file upload stream handling, and structured JSON error handling.
 - **Application Layer (`src/application/`)**: Use cases (`CreateImport`, `GetImportStatus`, `CancelImport`, `GetSummary`, `GetRejections`) and background streaming job processor (`ImportProcessor`).
-- **Domain Layer (`src/domain/`)**: Repository abstractions (`IImportRepository`, `ITransactionRepository`, `IRejectionRepository`), entities, domain validators, normalizers, fingerprint calculators, and risk scoring logic.
+- **Domain Layer (`src/domain/`)**: Entities (`ImportRecord`, `NewTransaction`, `NewRejection`) and every port the rest of the system depends on — repositories, `IFileStorage`, `IRiskWorkerPool`, `ILogger`, `IMetricsRecorder`, `IRetryPolicy`, `IClock`, `IIdGenerator` — plus validators, normalizers, the fingerprint calculator, the line-length limiter, and risk scoring. It imports nothing from any other layer.
 - **Infrastructure Layer (`src/infrastructure/`)**: Drizzle ORM PostgreSQL repositories, local file storage, worker thread pool, Pino logger, Prometheus metrics monitor, retry policy, and job recovery.
+
+### Dependency Direction & Injection
+- **Every port is declared in `src/domain/`, every adapter in `src/infrastructure/`, and the two meet only in `src/index.ts`** — the single composition root. Dependencies point inward: domain imports nothing, application imports only domain, infrastructure and presentation implement domain ports.
+- **The domain owns its own data shapes.** Repository interfaces speak in domain entities rather than Drizzle row types, and the Drizzle adapters map between the two in `mappers.ts`. This is what keeps persistence detail out of business logic — `amount` is a `number` in the domain and the mapper applies the `numeric(15,2)` string conversion, instead of the processor calling `.toFixed(2)`.
+- **No application or domain code reaches for a singleton, a database client, a clock, or an ID generator.** `IMetricsRecorder`, `IClock`, and `IIdGenerator` are injected; readiness receives a database probe as a function rather than importing the connection pool. `MetricsMonitor.getInstance()` appears exactly once, in the composition root.
+- Every injected dependency has an inert default (`silentLogger`, `noopMetricsRecorder`, `noRetryPolicy`, `systemClock`), so a test substitutes only what it asserts on.
+- `npm run typecheck` covers `tests/` and `scripts/` as well as `src/`, so a fake that drifts from the port it claims to implement fails the build rather than passing silently.
 
 ---
 

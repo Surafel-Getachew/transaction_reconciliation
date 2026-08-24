@@ -1,10 +1,10 @@
 import readline from "node:readline";
-import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
 import { IImportRepository } from "../../domain/repositories/import-repository.interface.js";
 import { ITransactionRepository } from "../../domain/repositories/transaction-repository.interface.js";
 import { IRejectionRepository } from "../../domain/repositories/rejection-repository.interface.js";
 import { IFileStorage } from "../../domain/storage/file-storage.interface.js";
-import { IRiskWorkerPool } from "../../infrastructure/workers/worker-pool.js";
+import { IRiskWorkerPool } from "../../domain/workers/risk-worker-pool.interface.js";
 import { TransactionValidator } from "../../domain/services/validator.js";
 import {
   TransactionNormalizer,
@@ -12,14 +12,16 @@ import {
 } from "../../domain/services/normalizer.js";
 import { FingerprintCalculator } from "../../domain/services/fingerprint.js";
 import { RiskInput } from "../../domain/services/risk-scorer.js";
-import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
-import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
+import { NewTransaction } from "../../domain/entities/transaction.entity.js";
+import { NewRejection } from "../../domain/entities/rejection.entity.js";
 import { IImportBatchPersister } from "../../domain/repositories/import-batch-persister.interface.js";
 import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
 import {
   IMetricsRecorder,
   noopMetricsRecorder,
 } from "../../domain/metrics/metrics-recorder.interface.js";
+import { IClock, systemClock } from "../../domain/time/clock.interface.js";
+import { IIdGenerator } from "../../domain/ids/id-generator.interface.js";
 import { LineLengthLimiter } from "../../domain/services/line-length-limiter.js";
 
 export interface ImportProcessorOptions {
@@ -41,6 +43,8 @@ export class ImportProcessor {
     private batchPersister?: IImportBatchPersister,
     private logger: ILogger = silentLogger,
     private metrics: IMetricsRecorder = noopMetricsRecorder,
+    private clock: IClock = systemClock,
+    private ids: IIdGenerator = { generate: () => randomUUID() },
   ) {
     this.batchSize = options?.batchSize || 1000;
     this.maxLineLength = options?.maxLineLength || 1000000;
@@ -94,7 +98,7 @@ export class ImportProcessor {
     this.metrics.incrementActiveImports();
 
     const log = this.logger.child({ importId, providerId });
-    const startedAt = Date.now();
+    const startedAt = this.clock.now().getTime();
     let batchNumber = 0;
 
     await this.importRepo.markStarted(importId);
@@ -117,7 +121,7 @@ export class ImportProcessor {
       normalized: NormalizedTransaction;
       fingerprint: string;
     }> = [];
-    let pendingRejections: NewRejectionRecord[] = [];
+    let pendingRejections: NewRejection[] = [];
 
     try {
       for await (const line of rl) {
@@ -132,7 +136,7 @@ export class ImportProcessor {
         // cap precisely so an over-long line is still detectable here.
         if (Buffer.byteLength(line) > this.maxLineLength) {
           pendingRejections.push({
-            id: nanoid(),
+            id: this.ids.generate(),
             importId,
             lineNumber,
             reason: "EXCESSIVE_LINE_LENGTH",
@@ -147,7 +151,7 @@ export class ImportProcessor {
           parsedJson = JSON.parse(trimmedLine);
         } catch {
           pendingRejections.push({
-            id: nanoid(),
+            id: this.ids.generate(),
             importId,
             lineNumber,
             reason: "INVALID_JSON",
@@ -160,7 +164,7 @@ export class ImportProcessor {
         const validation = TransactionValidator.validate(parsedJson);
         if (!validation.success) {
           pendingRejections.push({
-            id: nanoid(),
+            id: this.ids.generate(),
             importId,
             lineNumber,
             reason: validation.errorCode || "VALIDATION_ERROR",
@@ -226,7 +230,7 @@ export class ImportProcessor {
           status: finalStatus,
           batchCount: batchNumber,
           recordCount: lineNumber,
-          durationMs: Date.now() - startedAt,
+          durationMs: this.clock.now().getTime() - startedAt,
         },
         "import_finished",
       );
@@ -242,7 +246,7 @@ export class ImportProcessor {
           errorCode: error?.code,
           batchCount: batchNumber,
           recordCount: lineNumber,
-          durationMs: Date.now() - startedAt,
+          durationMs: this.clock.now().getTime() - startedAt,
         },
         "import_failed",
       );
@@ -259,7 +263,7 @@ export class ImportProcessor {
       normalized: NormalizedTransaction;
       fingerprint: string;
     }>,
-    rejectionItems: NewRejectionRecord[],
+    rejectionItems: NewRejection[],
     log: ILogger,
     batchNumber: number,
   ): Promise<boolean> {
@@ -272,7 +276,7 @@ export class ImportProcessor {
       return true;
     }
 
-    const startedAt = Date.now();
+    const startedAt = this.clock.now().getTime();
     let insertedCount = 0;
     let duplicateCount = 0;
 
@@ -291,16 +295,16 @@ export class ImportProcessor {
 
       const riskResults = await this.riskWorkerPool.processBatch(riskInputs);
 
-      const txRecords: NewTransactionRecord[] = validItems.map((item, idx) => {
+      const txRecords: NewTransaction[] = validItems.map((item, idx) => {
         const risk = riskResults[idx] || { riskScore: 0, riskLevel: "low" };
         return {
-          id: nanoid(),
+          id: this.ids.generate(),
           importId,
           providerId,
           transactionId: item.normalized.transactionId,
           accountId: item.normalized.accountId,
           merchantId: item.normalized.merchantId,
-          amount: item.normalized.amount.toFixed(2),
+          amount: item.normalized.amount,
           currency: item.normalized.currency,
           timestamp: new Date(item.normalized.timestamp),
           description: item.normalized.description,
@@ -365,7 +369,7 @@ export class ImportProcessor {
         accepted: acceptedDelta,
         rejected: rejectedDelta,
         duplicates: duplicateDelta,
-        durationMs: Date.now() - startedAt,
+        durationMs: this.clock.now().getTime() - startedAt,
       },
       "batch_persisted",
     );

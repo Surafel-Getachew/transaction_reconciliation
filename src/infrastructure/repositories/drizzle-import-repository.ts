@@ -1,10 +1,13 @@
 import { eq, sql } from "drizzle-orm";
 import { Database } from "../db/index.js";
+import { imports } from "../db/schema/imports.js";
 import {
-  imports,
   ImportRecord,
-  NewImportRecord,
-} from "../db/schema/imports.js";
+  ImportStatus,
+  NewImport,
+  TerminalImportStatus,
+} from "../../domain/entities/import.entity.js";
+import { toImportRecord } from "./mappers.js";
 import { idempotencyKeys } from "../db/schema/idempotency.js";
 import { IImportRepository } from "../../domain/repositories/import-repository.interface.js";
 
@@ -20,7 +23,7 @@ export class DrizzleImportRepository implements IImportRepository {
   ) {}
 
   async createWithIdempotency(
-    newImport: NewImportRecord,
+    newImport: NewImport,
     idempotencyKey: string,
   ): Promise<{ importRecord: ImportRecord; isDuplicate: boolean }> {
     return await this.db.transaction(async (tx) => {
@@ -45,7 +48,7 @@ export class DrizzleImportRepository implements IImportRepository {
           .limit(1);
 
         if (existingImport.length > 0) {
-          return { importRecord: existingImport[0], isDuplicate: true };
+          return { importRecord: toImportRecord(existingImport[0]), isDuplicate: true };
         }
       }
 
@@ -61,7 +64,7 @@ export class DrizzleImportRepository implements IImportRepository {
         importId: insertedImport.id,
       });
 
-      return { importRecord: insertedImport, isDuplicate: false };
+      return { importRecord: toImportRecord(insertedImport), isDuplicate: false };
     });
   }
 
@@ -71,7 +74,7 @@ export class DrizzleImportRepository implements IImportRepository {
       .from(imports)
       .where(eq(imports.id, id))
       .limit(1);
-    return res[0] || null;
+    return res[0] ? toImportRecord(res[0]) : null;
   }
 
   async findByIdempotencyKey(key: string): Promise<ImportRecord | null> {
@@ -82,12 +85,12 @@ export class DrizzleImportRepository implements IImportRepository {
       .where(eq(idempotencyKeys.key, key))
       .limit(1);
 
-    return res[0]?.import || null;
+    return res[0]?.import ? toImportRecord(res[0].import) : null;
   }
 
   async updateStatus(
     id: string,
-    status: ImportRecord["status"],
+    status: ImportStatus,
     failureReason?: string | null,
   ): Promise<void> {
     await this.db
@@ -134,7 +137,7 @@ export class DrizzleImportRepository implements IImportRepository {
 
   async markCompleted(
     id: string,
-    status: "completed" | "failed" | "cancelled",
+    status: TerminalImportStatus,
     failureReason?: string | null,
   ): Promise<void> {
     await this.db

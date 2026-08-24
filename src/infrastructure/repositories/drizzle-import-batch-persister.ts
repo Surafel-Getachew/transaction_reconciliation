@@ -8,6 +8,7 @@ import { Database } from "../db/index.js";
 import { imports } from "../db/schema/imports.js";
 import { rejections } from "../db/schema/rejections.js";
 import { transactions } from "../db/schema/transactions.js";
+import { toRejectionRow, toTransactionRow } from "./mappers.js";
 import {
   IRetryPolicy,
   noRetryPolicy,
@@ -34,14 +35,14 @@ export class DrizzleImportBatchPersister implements IImportBatchPersister {
           ? []
           : await tx
               .insert(transactions)
-              .values(batch.transactions)
+              .values(batch.transactions.map(toTransactionRow))
               .onConflictDoNothing({
                 target: [transactions.providerId, transactions.transactionId],
               })
               .returning({ id: transactions.id });
 
       if (batch.rejections.length > 0) {
-        await tx.insert(rejections).values(batch.rejections);
+        await tx.insert(rejections).values(batch.rejections.map(toRejectionRow));
       }
 
       const insertedCount = insertedRows.length;

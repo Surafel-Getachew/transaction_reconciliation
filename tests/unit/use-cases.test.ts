@@ -12,7 +12,7 @@ import { CancelImportUseCase } from '../../src/application/use-cases/cancel-impo
 import { GetSummaryUseCase } from '../../src/application/use-cases/get-summary.usecase.js';
 import { GetRejectionsUseCase } from '../../src/application/use-cases/get-rejections.usecase.js';
 import { ImportProcessor } from '../../src/application/processor/import-processor.js';
-import { IRiskWorkerPool } from '../../src/infrastructure/workers/worker-pool.js';
+import { IRiskWorkerPool } from '../../src/domain/workers/risk-worker-pool.interface.js';
 import { RiskInput, RiskResult } from '../../src/domain/services/risk-scorer.js';
 
 class MockWorkerPool implements IRiskWorkerPool {

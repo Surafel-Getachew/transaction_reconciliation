@@ -22,6 +22,8 @@ import { ImportJobQueue } from "./application/queue/import-job-queue.js";
 import { createLogger } from "./infrastructure/logging/pino-logger.js";
 import { BackoffRetryPolicy } from "./infrastructure/retry/backoff-retry-policy.js";
 import { MetricsMonitor } from "./infrastructure/metrics/metrics-monitor.js";
+import { nanoIdGenerator } from "./infrastructure/ids/nanoid-generator.js";
+import { systemClock } from "./domain/time/clock.interface.js";
 
 dotenv.config();
 
@@ -96,6 +98,8 @@ async function main() {
     batchPersister,
     logger,
     metrics,
+    systemClock,
+    nanoIdGenerator,
   );
 
   const importQueue = new ImportJobQueue(
@@ -115,6 +119,7 @@ async function main() {
     fileStorage,
     importProcessor,
     importQueue,
+    nanoIdGenerator,
   );
   const getImportStatusUseCase = new GetImportStatusUseCase(importRepo);
   const cancelImportUseCase = new CancelImportUseCase(importRepo);
@@ -133,10 +138,15 @@ async function main() {
     getSummaryUseCase,
     getRejectionsUseCase,
     () => acceptingTraffic,
+    metrics,
+    async () => {
+      await pool.query("SELECT 1");
+      return true;
+    },
   );
 
   const router = createRouter(controller);
-  const app = createApp(router, logger);
+  const app = createApp(router, logger, metrics);
 
   const port = parseInt(process.env.PORT || "3000", 10);
   const server = app.listen(port, () => {

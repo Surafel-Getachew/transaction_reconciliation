@@ -1,4 +1,4 @@
-import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
+import { NewTransaction } from "../entities/transaction.entity.js";
 
 export interface CurrencySummary {
   currency: string;
@@ -33,7 +33,7 @@ export interface ReconciliationSummary {
 
 export interface ITransactionRepository {
   batchInsert(
-    records: NewTransactionRecord[],
+    records: NewTransaction[],
   ): Promise<{ insertedCount: number; duplicateCount: number }>;
   getSummaryByImportId(importId: string): Promise<ReconciliationSummary | null>;
 }

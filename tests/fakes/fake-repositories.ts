@@ -3,16 +3,16 @@ import { IImportRepository } from '../../src/domain/repositories/import-reposito
 import { ITransactionRepository, ReconciliationSummary } from '../../src/domain/repositories/transaction-repository.interface.js';
 import { IRejectionRepository, PaginatedRejections } from '../../src/domain/repositories/rejection-repository.interface.js';
 import { IFileStorage } from '../../src/domain/storage/file-storage.interface.js';
-import { ImportRecord, NewImportRecord } from '../../src/infrastructure/db/schema/imports.js';
-import { NewTransactionRecord } from '../../src/infrastructure/db/schema/transactions.js';
-import { NewRejectionRecord } from '../../src/infrastructure/db/schema/rejections.js';
+import { ImportRecord, ImportStatus, NewImport, TerminalImportStatus } from '../../src/domain/entities/import.entity.js';
+import { NewTransaction } from '../../src/domain/entities/transaction.entity.js';
+import { NewRejection } from '../../src/domain/entities/rejection.entity.js';
 
 export class FakeImportRepository implements IImportRepository {
   public imports = new Map<string, ImportRecord>();
   public idempotencyKeys = new Map<string, string>(); // key -> importId
 
   async createWithIdempotency(
-    newImport: NewImportRecord,
+    newImport: NewImport,
     idempotencyKey: string
   ): Promise<{ importRecord: ImportRecord; isDuplicate: boolean }> {
     if (this.idempotencyKeys.has(idempotencyKey)) {
@@ -21,16 +21,20 @@ export class FakeImportRepository implements IImportRepository {
     }
 
     const record: ImportRecord = {
-      ...newImport,
+      id: newImport.id,
+      providerId: newImport.providerId,
       status: newImport.status || 'pending',
-      processedCount: newImport.processedCount || 0,
-      acceptedCount: newImport.acceptedCount || 0,
-      rejectedCount: newImport.rejectedCount || 0,
-      duplicateCount: newImport.duplicateCount || 0,
-      failureReason: newImport.failureReason || null,
-      startedAt: newImport.startedAt || null,
-      completedAt: newImport.completedAt || null,
-      createdAt: newImport.createdAt || new Date(),
+      processedCount: 0,
+      acceptedCount: 0,
+      rejectedCount: 0,
+      duplicateCount: 0,
+      failureReason: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: new Date(),
+      ownerId: null,
+      leaseExpiresAt: null,
+      attempts: 0,
     };
 
     this.imports.set(record.id, record);
@@ -49,7 +53,7 @@ export class FakeImportRepository implements IImportRepository {
     return this.imports.get(importId) || null;
   }
 
-  async updateStatus(id: string, status: ImportRecord['status'], failureReason?: string | null): Promise<void> {
+  async updateStatus(id: string, status: ImportStatus, failureReason?: string | null): Promise<void> {
     const rec = this.imports.get(id);
     if (rec) {
       rec.status = status;
@@ -70,6 +74,12 @@ export class FakeImportRepository implements IImportRepository {
     }
   }
 
+  async releaseOwnedLeases(): Promise<void> {
+    for (const record of this.imports.values()) {
+      record.leaseExpiresAt = new Date();
+    }
+  }
+
   async markStarted(id: string): Promise<void> {
     const rec = this.imports.get(id);
     if (rec) {
@@ -80,7 +90,7 @@ export class FakeImportRepository implements IImportRepository {
 
   async markCompleted(
     id: string,
-    status: 'completed' | 'failed' | 'cancelled',
+    status: TerminalImportStatus,
     failureReason?: string | null
   ): Promise<void> {
     const rec = this.imports.get(id);
@@ -93,11 +103,11 @@ export class FakeImportRepository implements IImportRepository {
 }
 
 export class FakeTransactionRepository implements ITransactionRepository {
-  public transactions: NewTransactionRecord[] = [];
+  public transactions: NewTransaction[] = [];
   public seenUnique = new Set<string>(); // providerId:transactionId
 
   async batchInsert(
-    records: NewTransactionRecord[]
+    records: NewTransaction[]
   ): Promise<{ insertedCount: number; duplicateCount: number }> {
     let insertedCount = 0;
     let duplicateCount = 0;
@@ -174,9 +184,9 @@ export class FakeTransactionRepository implements ITransactionRepository {
 }
 
 export class FakeRejectionRepository implements IRejectionRepository {
-  public rejections: NewRejectionRecord[] = [];
+  public rejections: NewRejection[] = [];
 
-  async batchInsert(records: NewRejectionRecord[]): Promise<void> {
+  async batchInsert(records: NewRejection[]): Promise<void> {
     this.rejections.push(...records);
   }
 

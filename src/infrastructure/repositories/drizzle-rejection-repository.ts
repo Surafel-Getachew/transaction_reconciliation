@@ -1,6 +1,8 @@
 import { eq, gt, and, asc } from "drizzle-orm";
 import { Database } from "../db/index.js";
-import { rejections, NewRejectionRecord } from "../db/schema/rejections.js";
+import { rejections } from "../db/schema/rejections.js";
+import { NewRejection } from "../../domain/entities/rejection.entity.js";
+import { toRejectionRow } from "./mappers.js";
 import {
   IRejectionRepository,
   PaginatedRejections,
@@ -9,9 +11,9 @@ import {
 export class DrizzleRejectionRepository implements IRejectionRepository {
   constructor(private db: Database) {}
 
-  async batchInsert(records: NewRejectionRecord[]): Promise<void> {
+  async batchInsert(records: NewRejection[]): Promise<void> {
     if (records.length === 0) return;
-    await this.db.insert(rejections).values(records);
+    await this.db.insert(rejections).values(records.map(toRejectionRow));
   }
 
   async findByImportIdPaginated(
@@ -45,7 +47,12 @@ export class DrizzleRejectionRepository implements IRejectionRepository {
     }
 
     return {
-      items: rows,
+      items: rows.map((row) => ({
+        lineNumber: row.lineNumber,
+        reason: row.reason,
+        message: row.message,
+        rawValue: (row.rawValue ?? null) as Record<string, unknown> | null,
+      })),
       nextCursor,
     };
   }

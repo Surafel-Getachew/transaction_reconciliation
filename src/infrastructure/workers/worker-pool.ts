@@ -7,14 +7,10 @@ import {
   RiskResult,
   RiskScorer,
 } from "../../domain/services/risk-scorer.js";
+import { IRiskWorkerPool } from "../../domain/workers/risk-worker-pool.interface.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-export interface IRiskWorkerPool {
-  processBatch(items: RiskInput[]): Promise<RiskResult[]>;
-  destroy(): Promise<void>;
-}
 
 // Tune per machine: CPU-bound scoring stops scaling past the fast physical cores.
 const DEFAULT_POOL_SIZE = Math.max(

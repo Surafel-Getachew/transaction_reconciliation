@@ -17,6 +17,7 @@ import { ImportController } from '../../src/presentation/http/controllers/import
 import { createRouter } from '../../src/presentation/http/routes.js';
 import { createApp } from '../../src/presentation/server.js';
 import { runMigrations } from '../../src/infrastructure/db/migrate.js';
+import { MetricsMonitor } from '../../src/infrastructure/metrics/metrics-monitor.js';
 import { JobRecoveryService } from '../../src/infrastructure/recovery/job-recovery.js';
 import { imports, transactions, rejections, idempotencyKeys } from '../../src/infrastructure/db/schema/index.js';
 import { eq } from 'drizzle-orm';
@@ -62,7 +63,13 @@ describe('Import & Reconciliation API Integration Tests', () => {
       getImportStatusUseCase,
       cancelImportUseCase,
       getSummaryUseCase,
-      getRejectionsUseCase
+      getRejectionsUseCase,
+      () => true,
+      MetricsMonitor.getInstance(),
+      async () => {
+        await pool.query('SELECT 1');
+        return true;
+      }
     );
 
     const router = createRouter(controller);

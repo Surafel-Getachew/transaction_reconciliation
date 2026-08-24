@@ -9,6 +9,12 @@ export interface IMetricsRecorder {
     duplicates: number,
   ): void;
   incrementRetryAttempts(): void;
+  recordHttpRequest(statusCode: number): void;
+}
+
+/** Rendering is separate from recording: only the /metrics endpoint needs it. */
+export interface IMetricsReporter {
+  formatPrometheusMetrics(): string;
 }
 
 export const noopMetricsRecorder: IMetricsRecorder = {
@@ -17,4 +23,5 @@ export const noopMetricsRecorder: IMetricsRecorder = {
   setQueueDepth() {},
   recordProcessedBatch() {},
   incrementRetryAttempts() {},
+  recordHttpRequest() {},
 };

@@ -92,6 +92,11 @@ npm run test:integration
 npm run test:all
 ```
 
+### Type-check everything (src, tests, scripts)
+```bash
+npm run typecheck
+```
+
 ---
 
 ## API Endpoints Summary

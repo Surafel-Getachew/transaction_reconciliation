@@ -6,8 +6,7 @@ import { GetImportStatusUseCase } from "../../../application/use-cases/get-impor
 import { CancelImportUseCase } from "../../../application/use-cases/cancel-import.usecase.js";
 import { GetSummaryUseCase } from "../../../application/use-cases/get-summary.usecase.js";
 import { GetRejectionsUseCase } from "../../../application/use-cases/get-rejections.usecase.js";
-import { MetricsMonitor } from "../../../infrastructure/metrics/metrics-monitor.js";
-import { pool } from "../../../infrastructure/db/index.js";
+import { IMetricsReporter } from "../../../domain/metrics/metrics-recorder.interface.js";
 import {
   NdjsonSniffer,
   NDJSON_SNIFF_BYTES,
@@ -37,6 +36,8 @@ export class ImportController {
     private getSummaryUseCase: GetSummaryUseCase,
     private getRejectionsUseCase: GetRejectionsUseCase,
     private isAcceptingTraffic: () => boolean = () => true,
+    private metricsReporter: IMetricsReporter = { formatPrometheusMetrics: () => "" },
+    private isDatabaseReachable: () => Promise<boolean> = async () => true,
   ) {}
 
   public createImport = async (
@@ -199,21 +200,19 @@ export class ImportController {
         .status(503)
         .json({ status: "not_ready", reason: "shutting_down" });
     }
-    try {
-      await pool.query("SELECT 1");
-      res.status(200).json({
-        status: "ready",
-        database: "connected",
-        timestamp: new Date().toISOString(),
-      });
-    } catch {
-      res.status(503).json({ status: "not_ready", database: "disconnected" });
+    const reachable = await this.isDatabaseReachable().catch(() => false);
+    if (!reachable) {
+      return res.status(503).json({ status: "not_ready", database: "disconnected" });
     }
+    res.status(200).json({
+      status: "ready",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    });
   };
 
   public getMetrics = async (_req: Request, res: Response) => {
-    const metrics = MetricsMonitor.getInstance();
     res.setHeader("Content-Type", "text/plain; version=0.0.4");
-    res.status(200).send(metrics.formatPrometheusMetrics());
+    res.status(200).send(this.metricsReporter.formatPrometheusMetrics());
   };
 }

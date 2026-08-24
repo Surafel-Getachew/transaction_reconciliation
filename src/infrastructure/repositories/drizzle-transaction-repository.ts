@@ -1,9 +1,8 @@
 import { eq, sql } from "drizzle-orm";
 import { Database } from "../db/index.js";
-import {
-  transactions,
-  NewTransactionRecord,
-} from "../db/schema/transactions.js";
+import { transactions } from "../db/schema/transactions.js";
+import { NewTransaction } from "../../domain/entities/transaction.entity.js";
+import { toTransactionRow } from "./mappers.js";
 import { imports } from "../db/schema/imports.js";
 import {
   ITransactionRepository,
@@ -14,7 +13,7 @@ export class DrizzleTransactionRepository implements ITransactionRepository {
   constructor(private db: Database) {}
 
   async batchInsert(
-    records: NewTransactionRecord[],
+    records: NewTransaction[],
   ): Promise<{ insertedCount: number; duplicateCount: number }> {
     if (records.length === 0) {
       return { insertedCount: 0, duplicateCount: 0 };
@@ -22,7 +21,7 @@ export class DrizzleTransactionRepository implements ITransactionRepository {
 
     const insertedRows = await this.db
       .insert(transactions)
-      .values(records)
+      .values(records.map(toTransactionRow))
       .onConflictDoNothing({
         target: [transactions.providerId, transactions.transactionId],
       })

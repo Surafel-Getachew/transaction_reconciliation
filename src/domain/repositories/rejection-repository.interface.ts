@@ -1,20 +1,12 @@
 import {
-  NewRejectionRecord,
-  RejectionRecord,
-} from "../../infrastructure/db/schema/rejections.js";
+  NewRejection,
+  PaginatedRejections,
+} from "../entities/rejection.entity.js";
 
-export interface PaginatedRejections {
-  items: Array<{
-    lineNumber: number;
-    reason: string;
-    message: string;
-    rawValue: any;
-  }>;
-  nextCursor?: number;
-}
+export type { PaginatedRejections };
 
 export interface IRejectionRepository {
-  batchInsert(records: NewRejectionRecord[]): Promise<void>;
+  batchInsert(records: NewRejection[]): Promise<void>;
   findByImportIdPaginated(
     importId: string,
     limit: number,

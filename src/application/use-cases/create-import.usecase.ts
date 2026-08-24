@@ -1,9 +1,10 @@
-import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { IImportRepository } from "../../domain/repositories/import-repository.interface.js";
 import { IFileStorage } from "../../domain/storage/file-storage.interface.js";
 import { ImportProcessor } from "../processor/import-processor.js";
-import { ImportRecord } from "../../infrastructure/db/schema/imports.js";
+import { ImportRecord } from "../../domain/entities/import.entity.js";
+import { IIdGenerator } from "../../domain/ids/id-generator.interface.js";
 import { IImportJobQueue } from "../queue/import-job-queue.js";
 
 export interface CreateImportDTO {
@@ -18,6 +19,7 @@ export class CreateImportUseCase {
     private fileStorage: IFileStorage,
     private importProcessor: ImportProcessor,
     private jobQueue?: IImportJobQueue,
+    private ids: IIdGenerator = { generate: () => randomUUID() },
   ) {}
 
   async execute(
@@ -48,7 +50,7 @@ export class CreateImportUseCase {
     }
 
     try {
-      const importId = nanoid();
+      const importId = this.ids.generate();
       const filePath = await this.fileStorage.saveStream(
         importId,
         dto.fileStream,
@@ -56,15 +58,7 @@ export class CreateImportUseCase {
 
       const { importRecord, isDuplicate } =
         await this.importRepo.createWithIdempotency(
-          {
-            id: importId,
-            providerId,
-            status: "pending",
-            processedCount: 0,
-            acceptedCount: 0,
-            rejectedCount: 0,
-            duplicateCount: 0,
-          },
+          { id: importId, providerId, status: "pending" },
           key,
         );
 

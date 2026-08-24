@@ -3,12 +3,16 @@ import cors from "cors";
 import { Router } from "express";
 import { errorHandler } from "./middlewares/error-handler.js";
 import { requestLogger } from "./middlewares/request-logger.js";
-import { MetricsMonitor } from "../infrastructure/metrics/metrics-monitor.js";
+import {
+  IMetricsRecorder,
+  noopMetricsRecorder,
+} from "../domain/metrics/metrics-recorder.interface.js";
 import { ILogger, silentLogger } from "../domain/logging/logger.interface.js";
 
 export function createApp(
   router: Router,
   logger: ILogger = silentLogger,
+  metrics: IMetricsRecorder = noopMetricsRecorder,
 ): Express {
   const app = express();
 
@@ -20,7 +24,7 @@ export function createApp(
 
   app.use((req, res, next) => {
     res.on("finish", () => {
-      MetricsMonitor.getInstance().recordHttpRequest(res.statusCode);
+      metrics.recordHttpRequest(res.statusCode);
     });
     next();
   });
