@@ -9,6 +9,8 @@ import {
   ReconciliationSummary,
 } from "../../domain/repositories/transaction-repository.interface.js";
 
+const SUMMARY_TOP_N = 100;
+
 export class DrizzleTransactionRepository implements ITransactionRepository {
   constructor(private db: Database) {}
 
@@ -76,7 +78,13 @@ export class DrizzleTransactionRepository implements ITransactionRepository {
       })
       .from(transactions)
       .where(eq(transactions.importId, importId))
-      .groupBy(transactions.merchantId);
+      .groupBy(transactions.merchantId)
+      .orderBy(
+        sql`sum(${transactions.amount}) DESC`,
+        sql`count(*) DESC`,
+        transactions.merchantId,
+      )
+      .limit(SUMMARY_TOP_N);
 
     // Account aggregation
     const accountRes = await this.db
@@ -87,7 +95,13 @@ export class DrizzleTransactionRepository implements ITransactionRepository {
       })
       .from(transactions)
       .where(eq(transactions.importId, importId))
-      .groupBy(transactions.accountId);
+      .groupBy(transactions.accountId)
+      .orderBy(
+        sql`sum(${transactions.amount}) DESC`,
+        sql`count(*) DESC`,
+        transactions.accountId,
+      )
+      .limit(SUMMARY_TOP_N);
 
     const byRiskLevel = {
       low: 0,

@@ -61,6 +61,10 @@ flowchart TD
 - **Active Import Concurrency**: `ImportJobQueue` is the single owner of how many imports run at once, capped at `MAX_ACTIVE_IMPORTS` (default: 2). The processor holds no limiter of its own — a second limit downstream of the queue could only block an already-admitted job, which would occupy a queue slot while doing no work and make the queue's own bound meaningless.
 - **Queue Bound**: `MAX_PENDING_IMPORTS` (default: 20) reserves capacity before file persistence. When full, the API returns `429 IMPORT_QUEUE_FULL`; uploads are never placed in an unbounded promise queue.
 
+### Bounded Summary Responses
+- Currency and risk-level summaries are complete because their cardinality is naturally small.
+- Merchant and account summaries are intentionally bounded to the top 100 groups, ordered by total amount descending, then transaction count and identifier for deterministic ties. This prevents a high-cardinality import from producing an unbounded response. The database still computes exact aggregates over matching transactions; if that becomes a performance bottleneck, per-import aggregate tables can be maintained during batch persistence.
+
 ### Idempotency & Duplicate Prevention
 - **Import Creation Idempotency**: DB table `idempotency_keys` with unique primary key `key`. A PostgreSQL transaction-scoped advisory lock keyed by `Idempotency-Key` makes the check/create sequence safe under concurrent requests.
 - **Transaction Duplicate Prevention**: PostgreSQL unique index `UNIQUE (provider_id, transaction_id)` enforces duplicate prevention across files, imports, process restarts, and concurrent workers using `ON CONFLICT DO NOTHING`.

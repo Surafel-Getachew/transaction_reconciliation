@@ -225,7 +225,7 @@ export const openApiDocument = {
         tags: ["Reconciliation"],
         summary: "Get reconciliation summary",
         description:
-          "Aggregates are derived from persisted transactions at request time, so the summary always reflects what is actually stored. Safe to call while an import is still processing — it returns the totals committed so far.",
+          "Aggregates are derived from persisted transactions at request time, so the summary always reflects what is actually stored. Safe to call while an import is still processing — it returns the totals committed so far. Currency and risk-level groups are complete; byMerchant and byAccount contain the top 100 groups ordered by total amount.",
         operationId: "getImportSummary",
         parameters: [importIdParam],
         responses: {
