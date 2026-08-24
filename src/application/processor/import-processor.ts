@@ -21,14 +21,11 @@ import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js"
 export interface ImportProcessorOptions {
   batchSize?: number;
   maxLineLength?: number;
-  maxActiveImports?: number;
 }
 
 export class ImportProcessor {
   private batchSize: number;
   private maxLineLength: number;
-  private maxActiveImports: number;
-  private currentActiveImports = 0;
 
   constructor(
     private importRepo: IImportRepository,
@@ -42,7 +39,6 @@ export class ImportProcessor {
   ) {
     this.batchSize = options?.batchSize || 1000;
     this.maxLineLength = options?.maxLineLength || 1000000;
-    this.maxActiveImports = options?.maxActiveImports || 2;
   }
 
   private limitedRawValue(raw: unknown): Record<string, unknown> {
@@ -90,12 +86,6 @@ export class ImportProcessor {
       return;
     }
 
-    // Enforce active import concurrency limit
-    while (this.currentActiveImports >= this.maxActiveImports) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-
-    this.currentActiveImports++;
     const metrics = MetricsMonitor.getInstance();
     metrics.incrementActiveImports();
 
@@ -245,7 +235,6 @@ export class ImportProcessor {
         "import_failed",
       );
     } finally {
-      this.currentActiveImports = Math.max(0, this.currentActiveImports - 1);
       metrics.decrementActiveImports();
       await this.fileStorage.deleteFile(filePath);
     }

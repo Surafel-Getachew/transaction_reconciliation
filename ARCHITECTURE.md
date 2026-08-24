@@ -50,7 +50,7 @@ flowchart TD
 
 ### Backpressure & Bounded Concurrency
 - **Stream Backpressure**: The parser consumes the file with `for await (const line of rl)`. The async iterator stops pulling while the loop body is awaiting risk scoring and the database write, and readline in turn pauses the underlying file stream once its internal buffer fills. Resident memory is therefore bounded by one batch plus that buffer, regardless of file size. Measured read-ahead stays at ~0.4MB even when a batch stalls for 250ms, and peak heap is flat at ~82MB across both a 72MB and a 216MB file.
-- **Active Import Concurrency**: Enforces a maximum of `MAX_ACTIVE_IMPORTS` (default: 2) concurrent processing imports.
+- **Active Import Concurrency**: `ImportJobQueue` is the single owner of how many imports run at once, capped at `MAX_ACTIVE_IMPORTS` (default: 2). The processor holds no limiter of its own — a second limit downstream of the queue could only block an already-admitted job, which would occupy a queue slot while doing no work and make the queue's own bound meaningless.
 - **Queue Bound**: `MAX_PENDING_IMPORTS` (default: 20) reserves capacity before file persistence. When full, the API returns `429 IMPORT_QUEUE_FULL`; uploads are never placed in an unbounded promise queue.
 
 ### Idempotency & Duplicate Prevention
