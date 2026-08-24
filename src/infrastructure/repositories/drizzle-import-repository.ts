@@ -8,8 +8,16 @@ import {
 import { idempotencyKeys } from "../db/schema/idempotency.js";
 import { IImportRepository } from "../../domain/repositories/import-repository.interface.js";
 
+export interface ImportLeaseOptions {
+  ownerId: string;
+  leaseTtlMs: number;
+}
+
 export class DrizzleImportRepository implements IImportRepository {
-  constructor(private db: Database) {}
+  constructor(
+    private db: Database,
+    private lease: ImportLeaseOptions = { ownerId: "local", leaseTtlMs: 60_000 },
+  ) {}
 
   async createWithIdempotency(
     newImport: NewImportRecord,
@@ -117,6 +125,9 @@ export class DrizzleImportRepository implements IImportRepository {
       .set({
         status: "processing",
         startedAt: new Date(),
+        ownerId: this.lease.ownerId,
+        leaseExpiresAt: new Date(Date.now() + this.lease.leaseTtlMs),
+        attempts: sql`${imports.attempts} + 1`,
       })
       .where(eq(imports.id, id));
   }
@@ -132,7 +143,16 @@ export class DrizzleImportRepository implements IImportRepository {
         status,
         completedAt: new Date(),
         failureReason: failureReason ?? null,
+        ownerId: null,
+        leaseExpiresAt: null,
       })
       .where(eq(imports.id, id));
+  }
+
+  async releaseOwnedLeases(): Promise<void> {
+    await this.db
+      .update(imports)
+      .set({ leaseExpiresAt: new Date() })
+      .where(eq(imports.ownerId, this.lease.ownerId));
   }
 }

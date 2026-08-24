@@ -17,6 +17,7 @@ export class DrizzleImportBatchPersister implements IImportBatchPersister {
   constructor(
     private readonly db: Database,
     private readonly retryPolicy: IRetryPolicy = noRetryPolicy,
+    private readonly leaseTtlMs = 60_000,
   ) {}
 
   async persist(batch: ImportBatch): Promise<BatchPersistResult> {
@@ -52,6 +53,9 @@ export class DrizzleImportBatchPersister implements IImportBatchPersister {
           acceptedCount: sql`${imports.acceptedCount} + ${insertedCount}`,
           rejectedCount: sql`${imports.rejectedCount} + ${batch.rejections.length}`,
           duplicateCount: sql`${imports.duplicateCount} + ${duplicateCount}`,
+          // Committing a batch proves the worker is alive, so it doubles as the
+          // lease heartbeat and costs no extra query.
+          leaseExpiresAt: new Date(Date.now() + this.leaseTtlMs),
         })
         .where(eq(imports.id, batch.importId));
 

@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, lt, or, isNull } from 'drizzle-orm';
 import { Database } from '../db/index.js';
 import { imports } from '../db/schema/imports.js';
 import { ILogger, silentLogger } from '../../domain/logging/logger.interface.js';
@@ -10,10 +10,21 @@ export class JobRecoveryService {
   ) {}
 
   async recoverStaleJobs(): Promise<number> {
+    // Only imports whose lease has lapsed are abandoned. An import still being
+    // processed by a live instance keeps renewing its lease on every batch, so
+    // starting a second instance leaves it alone.
     const staleJobs = await this.db
-      .select({ id: imports.id, status: imports.status })
+      .select({ id: imports.id, status: imports.status, ownerId: imports.ownerId })
       .from(imports)
-      .where(inArray(imports.status, ['processing', 'cancelling']));
+      .where(
+        and(
+          inArray(imports.status, ['processing', 'cancelling']),
+          or(
+            isNull(imports.leaseExpiresAt),
+            lt(imports.leaseExpiresAt, new Date()),
+          ),
+        ),
+      );
 
     if (staleJobs.length === 0) {
       return 0;
@@ -28,6 +39,8 @@ export class JobRecoveryService {
         .set({
           status: newStatus,
           completedAt: new Date(),
+          ownerId: null,
+          leaseExpiresAt: null,
           failureReason:
             newStatus === 'cancelled'
               ? 'Job cancelled prior to system restart'

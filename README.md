@@ -127,6 +127,7 @@ npm run test:all
 | `RETRY_INITIAL_DELAY_MS` | `100` | First retry backoff before jitter |
 | `RETRY_MAX_DELAY_MS` | `3000` | Backoff ceiling |
 | `SHUTDOWN_GRACE_PERIOD_MS` | `30000` | Maximum time allowed for graceful shutdown before forced exit |
+| `JOB_LEASE_TTL_MS` | `60000` | How long an import's processing lease stays valid without a batch commit; only lapsed leases are reclaimed on startup |
 | `LOG_LEVEL` | `info` | Pino log level (`debug` adds per-batch records) |
 | `AUTO_MIGRATE` | `true` | Set `false` to skip running migrations at startup |
 
@@ -156,5 +157,4 @@ Set `LOG_LEVEL=debug` to add per-batch records (scoring duration, commit duratio
 
 - **Single Node Queue**: Background processing uses an in-process bounded queue with worker threads. For multi-node distributed deployments across Kubernetes pods, a distributed Redis-backed queue (e.g. BullMQ) can be added as a worker transport.
 - **Delivery model**: **effectively-once for accepted transactions, at-least-once for progress counters.** Each batch commits its rows and its counter update in one database transaction, and duplicate transactions are prevented by `UNIQUE (provider_id, transaction_id)`. If a commit succeeds but its acknowledgement is lost, a retry re-applies the counter increments and re-inserts rejection rows, so counters can overcount for that batch; closing this needs a per-batch claim key keyed by `(import_id, batch_number)`, which is not implemented. A process interruption marks an active import `failed` on restart rather than resuming it — automatic redelivery would need a distributed queue.
-- **Single-instance job recovery**: `JobRecoveryService` marks *all* imports in `processing` as failed at startup. That is correct for a single instance, but a second instance starting up would mark a live instance's in-flight import as failed. Multi-instance deployment needs a job lease/owner column first.
 - **Pending imports are not re-queued**: the job queue is in-process, so an import that crashed before processing began stays `pending` rather than being picked up on restart.

@@ -1,4 +1,4 @@
-import { pgTable, varchar, integer, text, timestamp, pgEnum } from 'drizzle-orm/pg-core';
+import { pgTable, varchar, integer, text, timestamp, pgEnum, index } from 'drizzle-orm/pg-core';
 
 export const importStatusEnum = pgEnum('import_status', [
   'pending',
@@ -9,19 +9,28 @@ export const importStatusEnum = pgEnum('import_status', [
   'cancelled',
 ]);
 
-export const imports = pgTable('imports', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  providerId: varchar('provider_id', { length: 255 }).notNull(),
-  status: importStatusEnum('status').notNull().default('pending'),
-  processedCount: integer('processed_count').notNull().default(0),
-  acceptedCount: integer('accepted_count').notNull().default(0),
-  rejectedCount: integer('rejected_count').notNull().default(0),
-  duplicateCount: integer('duplicate_count').notNull().default(0),
-  failureReason: text('failure_reason'),
-  startedAt: timestamp('started_at', { withTimezone: true }),
-  completedAt: timestamp('completed_at', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const imports = pgTable(
+  'imports',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    providerId: varchar('provider_id', { length: 255 }).notNull(),
+    status: importStatusEnum('status').notNull().default('pending'),
+    processedCount: integer('processed_count').notNull().default(0),
+    acceptedCount: integer('accepted_count').notNull().default(0),
+    rejectedCount: integer('rejected_count').notNull().default(0),
+    duplicateCount: integer('duplicate_count').notNull().default(0),
+    failureReason: text('failure_reason'),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    ownerId: varchar('owner_id', { length: 64 }),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+  },
+  (table) => [
+    index('imports_lease_idx').on(table.status, table.leaseExpiresAt),
+  ]
+);
 
 export type ImportRecord = typeof imports.$inferSelect;
 export type NewImportRecord = typeof imports.$inferInsert;

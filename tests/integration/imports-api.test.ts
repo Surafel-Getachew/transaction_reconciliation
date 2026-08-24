@@ -17,7 +17,9 @@ import { ImportController } from '../../src/presentation/http/controllers/import
 import { createRouter } from '../../src/presentation/http/routes.js';
 import { createApp } from '../../src/presentation/server.js';
 import { runMigrations } from '../../src/infrastructure/db/migrate.js';
+import { JobRecoveryService } from '../../src/infrastructure/recovery/job-recovery.js';
 import { imports, transactions, rejections, idempotencyKeys } from '../../src/infrastructure/db/schema/index.js';
+import { eq } from 'drizzle-orm';
 
 describe('Import & Reconciliation API Integration Tests', () => {
   let app: any;
@@ -199,5 +201,43 @@ describe('Import & Reconciliation API Integration Tests', () => {
 
     expect(responses.every((response) => response.status === 202)).toBe(true);
     expect(new Set(responses.map((response) => response.body.id)).size).toBe(1);
+  });
+
+  it('job recovery reclaims only imports whose lease has expired', async () => {
+    const replicaA = new DrizzleImportRepository(db, {
+      ownerId: 'replica-a',
+      leaseTtlMs: 60_000,
+    });
+    const recovery = new JobRecoveryService(db);
+
+    for (const id of ['lease-live', 'lease-abandoned']) {
+      await replicaA.createWithIdempotency(
+        { id, providerId: 'lease-provider', status: 'pending' },
+        `lease-key-${id}`
+      );
+      await replicaA.markStarted(id);
+    }
+
+    // Only the abandoned import's owner stopped renewing its lease.
+    await db
+      .update(imports)
+      .set({ leaseExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(imports.id, 'lease-abandoned'));
+
+    // A second replica booting must not disturb the import still being worked on.
+    const reclaimed = await recovery.recoverStaleJobs();
+    expect(reclaimed).toBe(1);
+
+    const live = await replicaA.findById('lease-live');
+    expect(live?.status).toBe('processing');
+    expect(live?.ownerId).toBe('replica-a');
+
+    const abandoned = await replicaA.findById('lease-abandoned');
+    expect(abandoned?.status).toBe('failed');
+    expect(abandoned?.ownerId).toBeNull();
+
+    // Re-claiming a previously failed import counts as another attempt.
+    await replicaA.markStarted('lease-abandoned');
+    expect((await replicaA.findById('lease-abandoned'))?.attempts).toBe(2);
   });
 });

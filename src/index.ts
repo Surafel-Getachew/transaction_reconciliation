@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { nanoid } from "nanoid";
 import { db, pool } from "./infrastructure/db/index.js";
 import { DrizzleImportRepository } from "./infrastructure/repositories/drizzle-import-repository.js";
 import { DrizzleTransactionRepository } from "./infrastructure/repositories/drizzle-transaction-repository.js";
@@ -26,6 +27,11 @@ dotenv.config();
 const logger = createLogger();
 const shutdownSignal = new AbortController();
 
+// Identifies this process as the owner of the imports it is processing, so a
+// second instance can tell an abandoned job from one that is still running.
+const INSTANCE_ID = nanoid();
+const LEASE_TTL_MS = parseInt(process.env.JOB_LEASE_TTL_MS || "60000", 10) || 60000;
+
 async function main() {
   logger.info({}, "service_starting");
 
@@ -47,7 +53,10 @@ async function main() {
   }
 
   // 1. Infrastructure dependencies
-  const importRepo = new DrizzleImportRepository(db);
+  const importRepo = new DrizzleImportRepository(db, {
+    ownerId: INSTANCE_ID,
+    leaseTtlMs: LEASE_TTL_MS,
+  });
   const transactionRepo = new DrizzleTransactionRepository(db);
   const rejectionRepo = new DrizzleRejectionRepository(db);
   const retryPolicy = new BackoffRetryPolicy(logger, {
@@ -62,7 +71,11 @@ async function main() {
       : 3000,
     signal: shutdownSignal.signal,
   });
-  const batchPersister = new DrizzleImportBatchPersister(db, retryPolicy);
+  const batchPersister = new DrizzleImportBatchPersister(
+    db,
+    retryPolicy,
+    LEASE_TTL_MS,
+  );
   const fileStorage = new LocalFileStorage(process.env.TEMP_UPLOAD_DIR);
   const riskWorkerPool = new RiskWorkerPool();
 
@@ -152,6 +165,7 @@ async function main() {
       try {
         await importQueue.drain();
         await riskWorkerPool.destroy();
+        await importRepo.releaseOwnedLeases();
         await pool.end();
         shutdownLog.info({ shutdownState: "complete" }, "shutdown_completed");
         clearTimeout(forceExitTimer);
