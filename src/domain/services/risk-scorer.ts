@@ -15,8 +15,14 @@ export interface RiskResult {
 
 export class RiskScorer {
   public static calculate(input: RiskInput): RiskResult {
-    // 1. Amount factor (0 - 35 points)
-    const amountScore = Math.min(35, Math.floor(input.amount / 300));
+    // 1. Amount factor (0 - 35 points), scaled logarithmically so that
+    // ordinary transaction amounts still contribute meaningfully without
+    // letting large amounts dominate the entire score.
+    const safeAmount = Math.max(0, input.amount);
+    const amountScore = Math.min(
+      35,
+      Math.floor((Math.log1p(safeAmount) / Math.log1p(10_000)) * 35),
+    );
 
     // 2. Description length factor (0 - 15 points)
     const descScore = Math.min(15, Math.floor(input.descriptionLength / 30));
@@ -27,7 +33,7 @@ export class RiskScorer {
     // 4. Merchant hash factor (0 - 15 points)
     let merchantHash = 0;
     for (let i = 0; i < input.merchantId.length; i++) {
-      merchantHash = (merchantHash + input.merchantId.charCodeAt(i)) % 15;
+      merchantHash = (merchantHash + input.merchantId.charCodeAt(i)) % 16;
     }
 
     // 5. CPU-intensive simulation (crypto hashing loop)
@@ -36,7 +42,21 @@ export class RiskScorer {
       hash = crypto.createHash('sha256').update(hash).digest('hex');
     }
 
-    const totalScore = Math.min(100, Math.max(0, amountScore + descScore + hourScore + merchantHash));
+    // Use the final digest as a deterministic 0-10 point signal. The hashing
+    // work remains CPU-bound, but its result contributes to risk scoring.
+    const fingerprintScore = parseInt(hash.slice(0, 2), 16) % 11;
+
+    const totalScore = Math.min(
+      100,
+      Math.max(
+        0,
+        amountScore +
+          descScore +
+          hourScore +
+          merchantHash +
+          fingerprintScore,
+      ),
+    );
 
     let riskLevel: 'low' | 'medium' | 'high' = 'low';
     if (totalScore >= 70) {

@@ -20,4 +20,38 @@ describe('RiskScorer', () => {
     expect(res1.riskScore).toBeLessThanOrEqual(100);
     expect(['low', 'medium', 'high']).toContain(res1.riskLevel);
   });
+
+  it('should allow the fingerprint to influence the score', () => {
+    const scores = new Set<number>();
+
+    for (let i = 0; i < 12; i++) {
+      scores.add(
+        RiskScorer.calculate({
+          amount: 1500,
+          descriptionLength: 120,
+          transactionHour: 3,
+          merchantId: 'merchant-99',
+          fingerprint: i.toString(16).padStart(64, '0'),
+        }).riskScore,
+      );
+    }
+
+    expect(scores.size).toBeGreaterThan(1);
+  });
+
+  it('should make the full 0-100 score range reachable', () => {
+    const baseInput = {
+      amount: 10_000,
+      descriptionLength: 450,
+      transactionHour: 3,
+      merchantId: 'merchant-0',
+    };
+
+    expect(
+      RiskScorer.calculate({
+        ...baseInput,
+        fingerprint: '1'.padStart(64, '0'),
+      }).riskScore,
+    ).toBe(100);
+  });
 });
