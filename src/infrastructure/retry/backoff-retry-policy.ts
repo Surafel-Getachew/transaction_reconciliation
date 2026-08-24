@@ -3,7 +3,10 @@ import {
   RetryContext,
 } from "../../domain/retry/retry-policy.interface.js";
 import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
-import { MetricsMonitor } from "../metrics/metrics-monitor.js";
+import {
+  IMetricsRecorder,
+  noopMetricsRecorder,
+} from "../../domain/metrics/metrics-recorder.interface.js";
 import { RetryPolicy } from "./retry-policy.js";
 
 export interface BackoffRetryPolicyOptions {
@@ -17,6 +20,7 @@ export class BackoffRetryPolicy implements IRetryPolicy {
   constructor(
     private readonly logger: ILogger = silentLogger,
     private readonly options: BackoffRetryPolicyOptions = {},
+    private readonly metrics: IMetricsRecorder = noopMetricsRecorder,
   ) {}
 
   execute<T>(fn: () => Promise<T>, context: RetryContext): Promise<T> {
@@ -26,7 +30,7 @@ export class BackoffRetryPolicy implements IRetryPolicy {
       maxDelayMs: this.options.maxDelayMs,
       signal: this.options.signal,
       onRetry: (attempt, error, delayMs) => {
-        MetricsMonitor.getInstance().incrementRetryAttempts();
+        this.metrics.incrementRetryAttempts();
         this.logger.warn(
           {
             operationName: context.operationName,

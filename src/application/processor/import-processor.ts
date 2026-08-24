@@ -14,9 +14,13 @@ import { FingerprintCalculator } from "../../domain/services/fingerprint.js";
 import { RiskInput } from "../../domain/services/risk-scorer.js";
 import { NewTransactionRecord } from "../../infrastructure/db/schema/transactions.js";
 import { NewRejectionRecord } from "../../infrastructure/db/schema/rejections.js";
-import { MetricsMonitor } from "../../infrastructure/metrics/metrics-monitor.js";
 import { IImportBatchPersister } from "../../domain/repositories/import-batch-persister.interface.js";
 import { ILogger, silentLogger } from "../../domain/logging/logger.interface.js";
+import {
+  IMetricsRecorder,
+  noopMetricsRecorder,
+} from "../../domain/metrics/metrics-recorder.interface.js";
+import { LineLengthLimiter } from "../../domain/services/line-length-limiter.js";
 
 export interface ImportProcessorOptions {
   batchSize?: number;
@@ -36,6 +40,7 @@ export class ImportProcessor {
     options?: ImportProcessorOptions,
     private batchPersister?: IImportBatchPersister,
     private logger: ILogger = silentLogger,
+    private metrics: IMetricsRecorder = noopMetricsRecorder,
   ) {
     this.batchSize = options?.batchSize || 1000;
     this.maxLineLength = options?.maxLineLength || 1000000;
@@ -86,8 +91,7 @@ export class ImportProcessor {
       return;
     }
 
-    const metrics = MetricsMonitor.getInstance();
-    metrics.incrementActiveImports();
+    this.metrics.incrementActiveImports();
 
     const log = this.logger.child({ importId, providerId });
     const startedAt = Date.now();
@@ -97,8 +101,14 @@ export class ImportProcessor {
     log.info({ batchSize: this.batchSize }, "import_started");
 
     const readStream = this.fileStorage.getReadStream(filePath);
+    // pipe() does not forward source errors, and readline would otherwise wait
+    // forever on a stream that has already failed.
+    const boundedInput = new LineLengthLimiter(this.maxLineLength);
+    readStream.on("error", (err) => boundedInput.destroy(err));
+    readStream.pipe(boundedInput);
+
     const rl = readline.createInterface({
-      input: readStream,
+      input: boundedInput,
       crlfDelay: Infinity,
     });
 
@@ -118,13 +128,15 @@ export class ImportProcessor {
           continue;
         }
 
-        if (line.length > this.maxLineLength) {
+        // Bytes, matching LineLengthLimiter: it hands over one byte past the
+        // cap precisely so an over-long line is still detectable here.
+        if (Buffer.byteLength(line) > this.maxLineLength) {
           pendingRejections.push({
             id: nanoid(),
             importId,
             lineNumber,
             reason: "EXCESSIVE_LINE_LENGTH",
-            message: `Line exceeds maximum allowed length of ${this.maxLineLength} characters`,
+            message: `Line exceeds maximum allowed length of ${this.maxLineLength} bytes`,
             rawValue: { snippet: trimmedLine.substring(0, 100) + "..." },
           });
           continue;
@@ -166,7 +178,7 @@ export class ImportProcessor {
         // Awaiting here is the backpressure: the async iterator stops pulling
         // lines, and readline pauses the file stream once its buffer fills.
         if (pendingValid.length + pendingRejections.length >= this.batchSize) {
-          metrics.setQueueDepth(pendingValid.length + pendingRejections.length);
+          this.metrics.setQueueDepth(pendingValid.length + pendingRejections.length);
 
           const isCancelled = await this.flushBatch(
             importId,
@@ -178,7 +190,7 @@ export class ImportProcessor {
           );
           pendingValid = [];
           pendingRejections = [];
-          metrics.setQueueDepth(0);
+          this.metrics.setQueueDepth(0);
 
           if (isCancelled) {
             rl.close();
@@ -235,7 +247,7 @@ export class ImportProcessor {
         "import_failed",
       );
     } finally {
-      metrics.decrementActiveImports();
+      this.metrics.decrementActiveImports();
       await this.fileStorage.deleteFile(filePath);
     }
   }
@@ -339,7 +351,7 @@ export class ImportProcessor {
       });
     }
 
-    MetricsMonitor.getInstance().recordProcessedBatch(
+    this.metrics.recordProcessedBatch(
       processedDelta,
       acceptedDelta,
       rejectedDelta,

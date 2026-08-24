@@ -21,6 +21,7 @@ import { JobRecoveryService } from "./infrastructure/recovery/job-recovery.js";
 import { ImportJobQueue } from "./application/queue/import-job-queue.js";
 import { createLogger } from "./infrastructure/logging/pino-logger.js";
 import { BackoffRetryPolicy } from "./infrastructure/retry/backoff-retry-policy.js";
+import { MetricsMonitor } from "./infrastructure/metrics/metrics-monitor.js";
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ async function main() {
   }
 
   // 1. Infrastructure dependencies
+  const metrics = MetricsMonitor.getInstance();
   const importRepo = new DrizzleImportRepository(db, {
     ownerId: INSTANCE_ID,
     leaseTtlMs: LEASE_TTL_MS,
@@ -70,7 +72,7 @@ async function main() {
       ? parseInt(process.env.RETRY_MAX_DELAY_MS, 10)
       : 3000,
     signal: shutdownSignal.signal,
-  });
+  }, metrics);
   const batchPersister = new DrizzleImportBatchPersister(
     db,
     retryPolicy,
@@ -93,6 +95,7 @@ async function main() {
     },
     batchPersister,
     logger,
+    metrics,
   );
 
   const importQueue = new ImportJobQueue(

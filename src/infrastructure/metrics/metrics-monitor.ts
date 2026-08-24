@@ -1,6 +1,7 @@
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { IMetricsRecorder } from '../../domain/metrics/metrics-recorder.interface.js';
 
-export class MetricsMonitor {
+export class MetricsMonitor implements IMetricsRecorder {
   private static instance: MetricsMonitor;
   private histogram: ReturnType<typeof monitorEventLoopDelay>;
   private lastElu: ReturnType<typeof performance.eventLoopUtilization>;
