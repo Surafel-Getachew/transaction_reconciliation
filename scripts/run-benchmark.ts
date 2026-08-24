@@ -113,7 +113,7 @@ async function runBenchmark() {
     peakRssMb = Math.max(peakRssMb, readGauge(sample, 'process_resident_memory_bytes') / 1048576);
     peakHeapMb = Math.max(peakHeapMb, readGauge(sample, 'process_heap_used_bytes') / 1048576);
     peakLoopDelayMs = Math.max(peakLoopDelayMs, readGauge(sample, 'process_event_loop_delay_ms{quantile="0.99"}'));
-    peakLoopUtilization = Math.max(peakLoopUtilization, readGauge(sample, 'process_event_loop_utilization'));
+    peakLoopUtilization = Math.max(peakLoopUtilization, readGauge(sample, 'process_event_loop_utilization') * 100);
 
     await new Promise((r) => setTimeout(r, 100));
   }

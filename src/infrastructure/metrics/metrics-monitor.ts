@@ -78,7 +78,7 @@ export class MetricsMonitor implements IMetricsRecorder {
         meanDelayMs: isNaN(meanDelayMs) ? 0 : meanDelayMs,
         p50DelayMs: isNaN(p50DelayMs) ? 0 : p50DelayMs,
         p99DelayMs: isNaN(p99DelayMs) ? 0 : p99DelayMs,
-        utilizationPct: (currentElu.utilization * 100).toFixed(2),
+        utilization: currentElu.utilization,
       },
       memory: {
         rssBytes: mem.rss,
@@ -115,7 +115,12 @@ export class MetricsMonitor implements IMetricsRecorder {
 
       '# HELP process_event_loop_utilization Event loop utilization ratio',
       '# TYPE process_event_loop_utilization gauge',
-      `process_event_loop_utilization ${summary.eventLoop.utilizationPct}`,
+      `process_event_loop_utilization ${summary.eventLoop.utilization.toFixed(4)}`,
+
+      '# HELP process_cpu_seconds_total Total process CPU time consumed',
+      '# TYPE process_cpu_seconds_total counter',
+      `process_cpu_seconds_total{mode="user"} ${(summary.cpu.userMicros / 1e6).toFixed(3)}`,
+      `process_cpu_seconds_total{mode="system"} ${(summary.cpu.systemMicros / 1e6).toFixed(3)}`,
 
       '# HELP process_resident_memory_bytes Resident memory size in bytes',
       '# TYPE process_resident_memory_bytes gauge',

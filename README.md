@@ -111,6 +111,78 @@ Each batch is split across the worker pool so one import can use more than one w
 - Logs use request ids and do not expose uploaded data.
 - Merchant and account summary results are limited to the top 100 groups by total amount. Currency and risk summaries are complete.
 
+## Event loop and monitoring
+
+`GET /metrics` returns Prometheus text. It exposes:
+
+| Metric | Meaning |
+| :--- | :--- |
+| `process_event_loop_delay_ms{quantile="0.5"\|"0.99"}` | How late timers fire, p50 and p99 |
+| `process_event_loop_utilization` | Fraction of wall time the loop was working, 0 to 1 |
+| `process_cpu_seconds_total{mode="user"\|"system"}` | Process CPU time |
+| `process_heap_used_bytes`, `process_resident_memory_bytes` | Heap and RSS |
+| `app_active_imports` | Imports processing right now |
+| `app_processing_queue_depth` | Records waiting in the current batch |
+| `app_records_processed_total` and the accepted/rejected/duplicate counters | Throughput, as a rate over time |
+| `app_retry_attempts_total` | Retried batch writes |
+| `http_requests_total`, `http_requests_by_status` | Request counts |
+
+No metric uses an import id, transaction id, or request id as a label, so cardinality stays flat.
+
+### How blocking would be detected
+
+Event-loop delay is measured with `perf_hooks.monitorEventLoopDelay()`, which samples the gap
+between when a timer should fire and when it does. If synchronous work runs too long, that gap
+grows. Utilization comes from `performance.eventLoopUtilization()` and shows how much of the time
+the loop was busy rather than idle.
+
+Delay is the symptom users feel: when it is high, every request queued behind the blocking work
+waits. Watch p99 rather than the mean, because blocking is usually intermittent.
+
+### Thresholds worth alerting on
+
+- Event-loop delay p99 above ~50 ms: something synchronous is running too long.
+- Event-loop utilization sustained above ~0.85: the loop has no idle headroom left.
+- `app_processing_queue_depth` staying at the batch size: the pipeline is not draining.
+- Heap growing across a run instead of staying flat: something is accumulating.
+- `app_retry_attempts_total` climbing steadily: the database is struggling.
+
+For reference, the 500k benchmark run reached an event-loop delay p99 of 45.8 ms and a
+utilization of 0.146, while API median latency stayed at 3.8 ms.
+
+### CPU saturation vs slow downstream I/O
+
+Both make requests slow, but they look different:
+
+- **CPU saturation**: utilization is high *and* delay is high, and `process_cpu_seconds_total`
+  climbs quickly. The process is busy computing.
+- **Slow database or disk**: request latency rises while utilization and delay stay low. The
+  process is waiting, not computing.
+
+The difference matters because the fixes are opposite. High CPU means move work off the loop or
+add workers. Low CPU with slow requests means look at the database, the connection pool, or disk.
+
+### What could still block the loop
+
+- `JSON.parse` on each line and the SHA-256 fingerprint run on the main thread. Both are
+  microsecond-scale per record, and the loop yields at every batch boundary.
+- Building a batch of 1,000 records allocates; larger `BATCH_SIZE` values increase the pause
+  between yields.
+- Receiving a large multipart upload is main-thread stream work. This is the one measurable
+  effect: API p99 rose to 392 ms during the upload window of a 110 MB file, then returned to
+  single-digit milliseconds once processing began.
+- If the worker pool cannot be created at all, risk scoring falls back to the main thread. That
+  would block heavily, so it only happens when no worker could start.
+
+### How latency-sensitive endpoints are protected
+
+- Risk scoring, the only expensive work, runs in worker threads.
+- Reading is limited by stream backpressure, so a large file cannot outpace the pipeline.
+- Concurrent imports are capped by the queue, which returns `429` instead of queueing without
+  limit.
+- Batches are bounded, so the loop gets a turn at every batch boundary.
+- `GET /health/live` performs no I/O, so liveness stays truthful even when the database is slow.
+
 ## Deployment
 
 Railway is suitable for the current version:
