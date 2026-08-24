@@ -1,124 +1,145 @@
-# Architecture Documentation
+# Architecture
 
-Comprehensive architectural design for the **High-Throughput Transaction Import and Reconciliation Service**.
+## Overview
 
-## System Architecture Diagram
+The service has four main parts:
+
+- `presentation`: HTTP routes, uploads, errors, and OpenAPI.
+- `application`: use cases, the import processor, and the in-memory job queue.
+- `domain`: validation, normalization, fingerprints, risk scoring, and interfaces.
+- `infrastructure`: PostgreSQL repositories, file storage, worker threads, logging, metrics, retries, and recovery.
+
+`src/index.ts` wires the concrete infrastructure into the application. Business code uses interfaces instead of constructing database clients or other infrastructure directly.
+
+## Dependency direction and injection
+
+The domain defines interfaces for repositories, storage, workers, logging, metrics, clocks, ids, and retries. Infrastructure implements those interfaces. `src/index.ts` creates the concrete implementations and passes them into the use cases and processor. This keeps the application code independent of Express, Drizzle, and the filesystem.
 
 ```mermaid
-flowchart TD
-    Client[HTTP Client / API User] -->|POST /v1/imports<br/>Idempotency-Key| Router[Express Router & Controllers]
-    Router -->|1. Check/Persist Key| IdemDB[(PostgreSQL: idempotency_keys)]
-    Router -->|2. Save Stream| TempStorage[Local Temp File Storage]
-    Router -->|3. Return 202 Accepted| Client
-    
-    Router -.->|4. Trigger Async Job| Processor[Import Processor Stream Reader]
-    
-    subgraph Processing Pipeline
-        Processor -->|Stream line-by-line| Parser[NDJSON Parser & Validator]
-        Parser -->|Validation Failures| RejectionBatch[Rejection Batch Queue]
-        Parser -->|Valid Records| Normalizer[Normalizer & Fingerprint]
-        
-        Normalizer -->|Batch split into one chunk per worker| WorkerPool[Worker Thread Pool]
-        WorkerPool -->|Chunks scored in parallel, rejoined in order| RiskResult[Risk Level: Low/Med/High]
-        
-        RiskResult -->|Transaction Batch| DBWriter[Batch Persister + BackoffRetryPolicy]
-        RejectionBatch -->|Rejection Batch| DBWriter
-    end
-    
-    DBWriter -->|1. ON CONFLICT DO NOTHING| TxDB[(PostgreSQL: transactions)]
-    DBWriter -->|2. Batch Insert| RejDB[(PostgreSQL: rejections)]
-    DBWriter -->|3. Advance counters| ImportDB[(PostgreSQL: imports)]
-    
-    subgraph Observability & Monitoring
-        EventLoop[perf_hooks Monitor] -->|Track Delay & ELU| Metrics[MetricsMonitor /metrics]
-        ProcessMemory[Process Memory/CPU] -->|Track RSS & Heap| Metrics
-    end
+flowchart LR
+  Client --> API[Express API]
+  API --> Files[Temporary file]
+  API --> Queue[Bounded job queue]
+  Queue --> Processor[Import processor]
+  Processor --> Workers[Worker thread pool]
+  Processor --> DB[(PostgreSQL)]
+  DB --> API
 ```
 
----
+## Import flow
 
-## 1. System Components & Module Boundaries
+```text
+HTTP upload
+  -> temporary file
+  -> import row and queue entry
+  -> line-by-line parsing
+  -> validation and normalization
+  -> fingerprint and risk score
+  -> batch database transaction
+  -> status and summary endpoints
+```
 
-- **Presentation Layer (`src/presentation/`)**: Express controllers, routes, request validation, Multer file upload stream handling, and structured JSON error handling.
-- **Application Layer (`src/application/`)**: Use cases (`CreateImport`, `GetImportStatus`, `CancelImport`, `GetSummary`, `GetRejections`) and background streaming job processor (`ImportProcessor`).
-- **Domain Layer (`src/domain/`)**: Entities (`ImportRecord`, `NewTransaction`, `NewRejection`) and every port the rest of the system depends on — repositories, `IFileStorage`, `IRiskWorkerPool`, `ILogger`, `IMetricsRecorder`, `IRetryPolicy`, `IClock`, `IIdGenerator` — plus validators, normalizers, the fingerprint calculator, the line-length limiter, and risk scoring. It imports nothing from any other layer.
-- **Infrastructure Layer (`src/infrastructure/`)**: Drizzle ORM PostgreSQL repositories, local file storage, worker thread pool, Pino logger, Prometheus metrics monitor, retry policy, and job recovery.
+The file is never loaded into memory all at once. The processor waits at batch boundaries, which provides backpressure. The queue limits the number of active and pending imports.
 
-### Dependency Direction & Injection
-- **Every port is declared in `src/domain/`, every adapter in `src/infrastructure/`, and the two meet only in `src/index.ts`** — the single composition root. Dependencies point inward: domain imports nothing, application imports only domain, infrastructure and presentation implement domain ports.
-- **The domain owns its own data shapes.** Repository interfaces speak in domain entities rather than Drizzle row types, and the Drizzle adapters map between the two in `mappers.ts`. This is what keeps persistence detail out of business logic — `amount` is a `number` in the domain and the mapper applies the `numeric(15,2)` string conversion, instead of the processor calling `.toFixed(2)`.
-- **No application or domain code reaches for a singleton, a database client, a clock, or an ID generator.** `IMetricsRecorder`, `IClock`, and `IIdGenerator` are injected; readiness receives a database probe as a function rather than importing the connection pool. `MetricsMonitor.getInstance()` appears exactly once, in the composition root.
-- Every injected dependency has an inert default (`silentLogger`, `noopMetricsRecorder`, `noRetryPolicy`, `systemClock`), so a test substitutes only what it asserts on.
-- `npm run typecheck` covers `tests/` and `scripts/` as well as `src/`, so a fake that drifts from the port it claims to implement fails the build rather than passing silently.
+The queue rejects new work with `429` when it is full. The line reader pauses naturally while a batch is being scored and written.
 
----
+## Database
 
-## 2. Key Strategies & Mechanisms
+The main tables are:
 
-### Backpressure & Bounded Concurrency
-- **Stream Backpressure**: The parser consumes the file with `for await (const line of rl)`. The async iterator stops pulling while the loop body is awaiting risk scoring and the database write, and readline in turn pauses the underlying file stream once its internal buffer fills. Resident memory is therefore bounded by one batch plus that buffer, regardless of file size. Measured read-ahead stays at ~0.4MB even when a batch stalls for 250ms, and peak heap is flat at ~82MB across both a 72MB and a 216MB file.
-- **Line Length Bound**: `readline` imposes no limit on how long a single line may be, so a file containing one enormous line would be materialised whole in memory before any length check could run — a 400MB single-line file (legal under the 500MB upload cap) peaked at 806MB of heap. A `LineLengthLimiter` transform sits between the file stream and `readline`, truncating any line to one byte past `maxLineLength` and discarding the rest up to its newline. The same file now peaks at 12MB: the over-long line is recorded as an `EXCESSIVE_LINE_LENGTH` rejection and the records around it are still imported. The extra byte is what makes the truncation detectable downstream. Source-stream errors are forwarded to the transform explicitly, because `pipe()` does not propagate them and `readline` would otherwise wait on a stream that has already failed.
-- **Active Import Concurrency**: `ImportJobQueue` is the single owner of how many imports run at once, capped at `MAX_ACTIVE_IMPORTS` (default: 2). The processor holds no limiter of its own — a second limit downstream of the queue could only block an already-admitted job, which would occupy a queue slot while doing no work and make the queue's own bound meaningless.
-- **Queue Bound**: `MAX_PENDING_IMPORTS` (default: 20) reserves capacity before file persistence. When full, the API returns `429 IMPORT_QUEUE_FULL`; uploads are never placed in an unbounded promise queue.
+- `imports`: status, progress, lease data, and failure information.
+- `idempotency_keys`: maps an idempotency key to an import.
+- `transactions`: accepted transactions and risk results.
+- `rejections`: invalid or rejected input lines.
 
-### Bounded Summary Responses
-- Currency and risk-level summaries are complete because their cardinality is naturally small.
-- Merchant and account summaries are intentionally bounded to the top 100 groups, ordered by total amount descending, then transaction count and identifier for deterministic ties. This prevents a high-cardinality import from producing an unbounded response. The database still computes exact aggregates over matching transactions; if that becomes a performance bottleneck, per-import aggregate tables can be maintained during batch persistence.
+Important constraints and indexes:
 
-### Idempotency & Duplicate Prevention
-- **Import Creation Idempotency**: DB table `idempotency_keys` with unique primary key `key`. A PostgreSQL transaction-scoped advisory lock keyed by `Idempotency-Key` makes the check/create sequence safe under concurrent requests.
-- **Transaction Duplicate Prevention**: PostgreSQL unique index `UNIQUE (provider_id, transaction_id)` enforces duplicate prevention across files, imports, process restarts, and concurrent workers using `ON CONFLICT DO NOTHING`.
-- **Same id, different content: first write wins, and the discrepancy is recorded.** On conflict the batch persister reads the stored fingerprint for the conflicting ids and compares it with the incoming one, in the same transaction as the insert. An identical re-submission counts as a `duplicate` and nothing more. A conflict whose fingerprint differs — the same `transactionId` arriving with a different amount, account, or currency — is written to `rejections` with reason `DUPLICATE_CONTENT_MISMATCH`, carrying its line number and the offending `transactionId`. The stored row is never overwritten.
-- This is also the only thing the fingerprint is *read* for: it is what distinguishes a harmless replay from a genuine content conflict.
-- **Counter semantics follow from that split.** A conflict is counted as `rejected`, not as a `duplicate`, so `accepted + rejected + duplicates == processed` still holds exactly and the `rejections` table stays consistent with `rejectedCount`. `duplicates` therefore means "same id, same content". Counting a conflict as both would double-count it against `processed`; leaving it out of both would return rows from `/rejections` that no counter accounts for.
-- The comparison costs one indexed `SELECT` per batch, issued only when a batch actually had conflicts.
+- Primary keys identify all records.
+- Foreign keys connect transactions and rejections to imports.
+- `UNIQUE (provider_id, transaction_id)` prevents duplicate accepted transactions.
+- Import, currency, risk, and rejection indexes support common reads.
+- Rejections use cursor pagination by line number.
 
-### Upload Validation
-- **The filename and the client MIME type are never the basis for acceptance.** The `.ndjson` extension check in the multer `fileFilter` is only a cheap early gate that avoids spooling an obviously wrong 500MB body to disk; it is not the security boundary.
-- The authoritative check is on content: after the upload lands on disk, the first 64KB are read and `NdjsonSniffer` requires the first non-blank line (after any byte order mark) to parse as a JSON **object**. This rejects a renamed archive, a CSV, a JSON array, pretty-printed JSON, and an empty file, all of which pass an extension check. Content holding a NUL byte is rejected outright as binary.
-- A first record larger than the 64KB window is accepted and left to per-line validation, so a legitimately long record is rejected as one bad line rather than failing the whole import.
-- **The MIME type is deliberately not checked at all.** An allowlist would be trivially satisfied by an attacker setting the header, while rejecting honest clients: `curl -F "file=@data.ndjson"` sends `application/octet-stream`. It would add no security and break the most common upload path.
-- Request shape is bounded independently of content: multer caps `fileSize`, `files: 1`, `fields: 5`, and `parts: 10`, and the JSON and urlencoded body parsers are capped at 1MB. Each limit maps to a distinct client error — `TOO_MANY_FILES`, `UNEXPECTED_FILE_FIELD`, `TOO_MANY_PARTS`, `TOO_MANY_FIELDS`, `IMPORT_FILE_TOO_LARGE`, `REQUEST_BODY_TOO_LARGE` — rather than surfacing as a 500.
-- Rejected uploads return `400 INVALID_FILE_TYPE`, and the staged temp file is removed in the request's `finally` block, so a rejected upload leaves nothing on disk.
-- Path traversal is not reachable from the filename: multer names the staged file itself, and `LocalFileStorage` names the stored file from the generated import id, so `originalname` never reaches a filesystem path.
+Import creation uses a PostgreSQL advisory lock so two requests with the same idempotency key cannot create two imports.
 
-### Off-Event-Loop Risk Scoring
-- CPU-intensive risk calculation (a multi-round crypto hashing loop) runs on a fixed pool of Node `worker_threads` (`src/infrastructure/workers/worker-pool.ts`), so the HTTP event loop is never occupied by scoring.
-- **Risk score composition** is deterministic and capped at 100: amount contributes 0–35 points using logarithmic scaling (saturating at $10,000), description length contributes 0–15, overnight hours (00:00–05:00 UTC) contribute 25 otherwise 5, the merchant hash contributes 0–15, and the final SHA-256 digest contributes 0–10 fingerprint points. The fingerprint is therefore both a deduplication input and a scoring signal; the 500 hashing rounds are not discarded CPU work.
-- **Each batch is split into one chunk per worker** and the chunks are enqueued as independent tasks, so the whole pool works on one batch. Sending a whole batch to a single worker would leave every other worker idle and make the pool decorative. Chunks are contiguous slices re-joined in order, because the processor pairs results to records positionally.
-- **The speedup is real but sublinear**: measured 1,769 → ~3,000 records/sec (≈1.7×) on an 8-core Apple M1, plateauing from three workers upward. Scoring is a tight SHA-256 loop, so throughput is bounded by the fast physical cores, not the thread count — a batch finishes only when its slowest chunk does, and extra chunks land on slower cores. `WORKER_CONCURRENCY` defaults to 4 and should be measured per machine rather than derived from the core count.
-- **A worker that errors is removed from the pool** and its task rejected, so a broken worker is not handed further work. There is no per-task timeout: a worker that hangs rather than erroring holds its chunk indefinitely.
-- If the pool could not be created at all, scoring falls back to the main thread so imports still complete. This degrades API latency and is not currently surfaced as its own metric.
+## Concurrency and risk scoring
 
-### Retry Policy & Error Classification
-- The `IRetryPolicy` port (`src/domain/retry/retry-policy.interface.ts`) is implemented by `BackoffRetryPolicy` and injected into `DrizzleImportBatchPersister`, wrapping **batch persistence** — the one operation with a genuine transient failure mode (connection drops, deadlocks, serialization failures). Attempts are capped (`RETRY_MAX_ATTEMPTS`, default 4), backoff is exponential with full jitter so concurrent failures do not re-converge on the same retry instant, and every retry is logged with `operationName`, `retryAttempt`, `delayMs`, and `errorCode` and counted in `app_retry_attempts_total`.
-- **The retried unit is a single database transaction.** `persist()` writes the transaction rows, the rejection rows, and the counter increments inside one `BEGIN`/`COMMIT`. A failed attempt therefore rolls back completely and leaves nothing behind for the next attempt to trip over, and the transaction insert itself is guarded by `ON CONFLICT DO NOTHING` on `(provider_id, transaction_id)`.
-- **Known gap — the ambiguous commit.** If PostgreSQL commits but the acknowledgement is lost (connection reset at exactly the wrong moment), a retry re-applies the counter increments and re-inserts the rejection rows, which carry no unique constraint. Transaction rows are still protected by the unique index, so the ledger stays correct, but progress counters can overcount for that batch. Closing this needs a batch-level claim key — an `import_batches` row keyed by `(import_id, batch_number)` written in the same transaction — which is not implemented. The delivery guarantee today is therefore **at-least-once for counters, effectively-once for accepted transactions**.
-- **Never retried**: validation failures, duplicate records, constraint violations (`23505`, `23503`), cancellations, and programming errors (`TypeError`, `SyntaxError`). These are deterministic — another attempt produces the same failure and only burns capacity. Validation happens before persistence, so a bad record can never reach the retry path.
-- **Retry storms** are avoided by the attempt cap, the jittered backoff, and the bounded import queue upstream: a struggling database cannot be met with unbounded concurrent retries.
-- **After the final attempt** the error propagates out of `persist()` to `ImportProcessor`, which marks the import `failed` with a non-sensitive reason and logs `import_failed` with the error. The raw error stays in the logs and never reaches the client.
-- Retries are **cancellable**: the policy accepts an `AbortSignal`, stops retrying once it is aborted, and interrupts the backoff sleep. The composition root wires this to the shutdown controller, so `SIGTERM` does not wait out a long backoff.
+Risk scoring runs in a reusable worker-thread pool. Each batch is split into chunks and sent to available workers. Results are joined in the original order.
 
-### Error Exposure
-- **A failed import stores a classified reason, never the underlying error text.** Database drivers put schema in `error.message` — PostgreSQL returns strings such as `null value in column "secret_col" of relation "acct" violates not-null constraint` and `syntax error at or near "FRM"`. Since `GET /v1/imports/:id` returns `failureReason` verbatim, writing that through would publish constraint names, column names, and SQL fragments.
-- `classifyImportFailure` maps an error to one of `STORAGE_READ_FAILED`, `PERSISTENCE_FAILED`, `CANCELLED`, or `PROCESSING_FAILED` by inspecting error *shape* — SQLSTATE pattern, `severity` field, filesystem errno — and returns a fixed phrase. The classified code and the full error, stack included, go to the log instead.
-- The HTTP error handler applies the same rule: any 5xx reports `INTERNAL_SERVER_ERROR`, so a driver code such as `23505` cannot become the public error code.
+The score is deterministic and has these parts:
 
-### Graceful Shutdown & Job Recovery
-On `SIGTERM` or `SIGINT` the process, in order: stops accepting new imports and fails readiness (so a load balancer drains it) → signals in-flight imports to stop at their **next batch boundary** → closes the HTTP server → drains the import queue → drains and terminates the worker pool → closes the database pool → flushes logs and exits.
+- amount: 0-35 points, using logarithmic scaling
+- description length: 0-15 points
+- transaction hour: 25 points for 00:00-05:00 UTC, otherwise 5
+- merchant id: 0-15 points
+- final fingerprint digest: 0-10 points
 
-- **The batch currently being written always commits.** Shutdown only prevents the *next* batch from starting; it never aborts an open database transaction, so the ledger and the counters stay consistent.
-- **Grace period**: `SHUTDOWN_GRACE_PERIOD_MS` (default 30s). If it expires, the process logs at error level and exits non-zero with work still in flight. Those imports are left in `processing` and are picked up by `JobRecoveryService` on the next start.
-- **Cancellation vs. shutdown** are deliberately different: cancellation is a user decision about one import and terminates it as `cancelled`, retaining everything committed before the checkpoint; shutdown is an operational event affecting every import and terminates them as `failed`, so they are visible as unfinished rather than silently marked done.
-- **Imports are owned by a lease, not by the process that happens to be running.** Claiming an import stamps `owner_id` (a per-process id), sets `lease_expires_at` to now + `JOB_LEASE_TTL_MS` (default 60s), and increments `attempts`. `JobRecoveryService` only reclaims imports whose lease has lapsed, so a second instance starting up marks a crashed instance's work `failed` (or `cancelled`) while leaving a live instance's in-flight import untouched. Without the lease, any starting process would fail every in-flight import in the fleet.
-- **The batch commit is the heartbeat.** The batch persister already updates the `imports` row to advance counters, so it extends `lease_expires_at` in that same statement — no timer, no extra query, and the renewal happens inside the transaction that proves the worker is alive. A TTL well above the worst-case batch time keeps a slow batch from losing its own lease.
-- Completing an import clears `owner_id` and `lease_expires_at`. Graceful shutdown expires this instance's leases on the way out, so a planned restart reclaims immediately instead of waiting out the TTL. The `(status, lease_expires_at)` index keeps the recovery scan off a sequential scan.
+The final score is capped at 100. Risk levels are low from 0-39, medium from 40-69, and high from 70-100.
 
-### Structured Logging
-- A single `ILogger` port (`src/domain/logging/logger.interface.ts`) is implemented by a Pino adapter and injected from the composition root; no module constructs its own logger. Components default to a silent logger so tests stay quiet.
-- Every HTTP request gets a correlation id — an inbound `X-Request-Id` is honoured only when it matches a short safe-character pattern, otherwise one is generated — which is echoed in the response header, attached to the request's child logger, and returned in every error envelope. Every field is JSON-encoded, so untrusted input cannot forge a log line.
-- The processor binds `importId` and `providerId` to a child logger for the life of an import; batch records add `batchNumber`, `recordCount`, and `durationMs`, and shutdown records add `signal` and `shutdownState`.
-- Transaction descriptions and raw rejected values are redacted at the root logger, so no child can leak them.
+## Persistence and retries
 
-### API Documentation
-- An OpenAPI 3.0 document is served as Swagger UI at `/docs`, and `/` redirects there. The document is a typed object compiled into the bundle rather than a YAML asset, so it needs no extra copy step in the Dockerfile and cannot drift out of the build.
+Each batch writes transactions, rejections, and import counters in one database transaction.
+
+Database batch writes retry temporary failures with:
+
+- a maximum attempt count
+- exponential backoff
+- jitter
+- error classification
+- logging and metrics
+- shutdown cancellation
+
+Validation failures, duplicates, cancellations, constraint errors, and programming errors are not retried.
+
+## Cancellation
+
+Cancellation changes an active import to `cancelling`. The processor checks that state at batch boundaries, finishes the current database transaction, and then stops. Rows already committed remain in the database. The final status becomes `cancelled`.
+
+## Duplicate handling
+
+The database uses first-write-wins for `(provider_id, transaction_id)`. The unique constraint prevents the later row from replacing the original.
+
+Duplicate handling is first-write-wins. An identical replay is counted as a duplicate. If the same transaction id has a different fingerprint, the stored row is kept and the incoming row is recorded in `rejections` with reason `DUPLICATE_CONTENT_MISMATCH`.
+
+## Job recovery
+
+Each process has an owner id. When an import starts, it gets:
+
+- an owner id
+- a lease expiry time
+- an attempt count
+
+The batch persister extends the lease when it commits a batch. On startup, only processing jobs whose lease has expired are treated as stale. A live job on another instance is not failed just because a new instance starts.
+
+This is only the lease foundation. Updates to progress and final status do not yet check the owner, so a stale worker could still write after its lease expires. Full multi-instance safety needs owner-token or fencing checks on every job update.
+
+If a process stops during an import, the database transaction either commits or rolls back. After the lease expires, the job is identified as stale. Import-level redelivery is not enabled yet, so the current policy marks stale work as failed instead of replaying the file.
+
+## Event-loop protection
+
+Risk scoring runs in worker threads, not on the HTTP event loop. File parsing and database writes are still performed by the main process, but they are streamed, batched, and bounded. The metrics endpoint reports event-loop delay and utilization.
+
+## Shutdown
+
+On `SIGTERM` or `SIGINT`, the service:
+
+1. stops accepting new imports
+2. marks readiness as failed
+3. stops taking new queue work
+4. lets the current batch finish when possible
+5. closes the HTTP server, workers, and database
+6. expires its owned leases
+
+If the process stops during a batch, the lease eventually expires and the job can be identified as stale.
+
+## Summary responses
+
+Currency and risk-level summaries are complete. Merchant and account summaries return the top 100 groups, ordered by total amount, transaction count, and identifier. This keeps response size bounded. A separate paginated endpoint or precomputed summary tables can be added if full group listings are needed.
+
+## Current limitations
+
+- The queue is local to one process. Multiple replicas need a shared queue or PostgreSQL job polling.
+- Uploads are stored on the local filesystem. Multiple replicas need shared object storage.
+- Lease ownership is not yet enforced on progress and completion writes.
+- Import-level retry and redelivery are not implemented. Failed imports are marked failed and temporary files are removed.
+- A retry after an ambiguous database commit can overcount progress counters. Batch claim records would fix this.

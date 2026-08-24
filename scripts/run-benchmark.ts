@@ -84,6 +84,18 @@ async function runBenchmark() {
   const apiLatencies: number[] = [];
   let isDone = false;
   let statusResult: any;
+  let peakRssMb = 0;
+  let peakHeapMb = 0;
+  let peakLoopDelayMs = 0;
+  let peakLoopUtilization = 0;
+
+  // some series carry labels, e.g. process_event_loop_delay_ms{quantile="0.99"}
+  const readGauge = (text: string, series: string): number => {
+    const match = text.match(
+      new RegExp(`^${series.replace(/[{}"".]/g, (c) => '\\' + c)} ([0-9.eE+-]+)$`, 'm')
+    );
+    return match ? parseFloat(match[1]) : 0;
+  };
 
   while (!isDone) {
     const pollStart = performance.now();
@@ -97,16 +109,18 @@ async function runBenchmark() {
         isDone = true;
       }
     }
+    const sample = await (await fetch(`${API_BASE}/metrics`)).text();
+    peakRssMb = Math.max(peakRssMb, readGauge(sample, 'process_resident_memory_bytes') / 1048576);
+    peakHeapMb = Math.max(peakHeapMb, readGauge(sample, 'process_heap_used_bytes') / 1048576);
+    peakLoopDelayMs = Math.max(peakLoopDelayMs, readGauge(sample, 'process_event_loop_delay_ms{quantile="0.99"}'));
+    peakLoopUtilization = Math.max(peakLoopUtilization, readGauge(sample, 'process_event_loop_utilization'));
+
     await new Promise((r) => setTimeout(r, 100));
   }
 
   const endTime = performance.now();
   const totalDurationSec = (endTime - startTime) / 1000;
   const throughput = recordCount / totalDurationSec;
-
-  // 3. Fetch Prometheus metrics
-  const metricsRes = await fetch(`${API_BASE}/metrics`);
-  const metricsText = await metricsRes.text();
 
   apiLatencies.sort((a, b) => a - b);
   const p50Latency = apiLatencies[Math.floor(apiLatencies.length * 0.5)] || 0;
@@ -124,6 +138,12 @@ async function runBenchmark() {
   console.log(`Accepted:                 ${statusResult.progress.accepted}`);
   console.log(`Rejected:                 ${statusResult.progress.rejected}`);
   console.log(`Duplicates:               ${statusResult.progress.duplicates}`);
+  console.log(`Peak RSS:                 ${peakRssMb.toFixed(0)} MB`);
+  console.log(`Peak Heap Used:           ${peakHeapMb.toFixed(0)} MB`);
+  console.log(`Event-Loop Delay P99:     ${peakLoopDelayMs.toFixed(2)} ms`);
+  console.log(`Event-Loop Utilization:   ${peakLoopUtilization.toFixed(2)} %`);
+  console.log(`Worker Concurrency:       ${process.env.WORKER_CONCURRENCY || '4 (default)'}`);
+  console.log(`DB Batch Size:            ${process.env.BATCH_SIZE || '1000 (default)'}`);
   console.log(`CPU Cores:                ${os.cpus().length} (${os.arch()})`);
   console.log(`Total System Memory:      ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(2)} GB`);
   console.log('========================================\n');

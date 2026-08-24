@@ -217,6 +217,59 @@ describe('Import & Reconciliation API Integration Tests', () => {
   });
 
 
+  it('handles a transaction id repeated within a single file', async () => {
+    const repeatedId = `tx-in-file-${Date.now()}`;
+    const record = (over: object) => ({
+      transactionId: repeatedId,
+      accountId: 'acc-1',
+      merchantId: 'mer-1',
+      amount: 100,
+      currency: 'USD',
+      timestamp: '2026-07-20T10:00:00.000Z',
+      ...over,
+    });
+
+    // one accepted, one identical repeat, one repeat with different content
+    const file = [
+      record({}),
+      record({}),
+      record({ amount: 999999, accountId: 'acc-other' }),
+    ]
+      .map((r) => JSON.stringify(r))
+      .join('\n');
+
+    const res = await request(app)
+      .post('/v1/imports')
+      .set('Idempotency-Key', `in-file-${Date.now()}`)
+      .set('X-Provider-Id', 'in-file-provider')
+      .attach('file', Buffer.from(file + '\n'), 'repeat.ndjson');
+    expect(res.status).toBe(202);
+
+    let status: any;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      const poll = await request(app).get(`/v1/imports/${res.body.id}`);
+      if (['completed', 'failed'].includes(poll.body.status)) {
+        status = poll.body;
+        break;
+      }
+    }
+
+    expect(status.status).toBe('completed');
+    expect(status.progress.accepted).toBe(1);
+    expect(status.progress.duplicates).toBe(1);
+    expect(status.progress.rejected).toBe(1);
+    // every submitted record lands in exactly one bucket
+    expect(
+      status.progress.accepted + status.progress.rejected + status.progress.duplicates
+    ).toBe(status.progress.processed);
+
+    const rejections = await request(app).get(`/v1/imports/${res.body.id}/rejections`);
+    expect(rejections.body.items).toHaveLength(1);
+    expect(rejections.body.items[0].reason).toBe('DUPLICATE_CONTENT_MISMATCH');
+    expect(rejections.body.items[0].lineNumber).toBe(3);
+  });
+
   it('records a rejection when a duplicate transaction id carries different content', async () => {
     const sharedTxnId = `tx-conflict-${Date.now()}`;
     const original = {

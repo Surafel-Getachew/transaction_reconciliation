@@ -1,96 +1,94 @@
-# Benchmark & Performance Report
+# Benchmark Report
 
-This document contains empirical performance benchmark results for the **High-Throughput Transaction Import and Reconciliation Service**, including system specs, throughput, API latency impact, memory metrics, and architectural observations.
+## How to reproduce
 
-## Benchmark Test Setup
+```bash
+docker compose up -d postgres
+npm run db:migrate
+npm run dev            # in a second terminal
+npm run benchmark -- --records=500000
+```
 
-- **Test Tool**: Custom benchmark runner script (`scripts/run-benchmark.ts`) sending streaming HTTP multipart NDJSON uploads, plus a polling harness that samples `GET /v1/imports/:id`, `GET /health/live`, `GET /v1/imports/:id/rejections`, and `GET /metrics` once per second for the entire duration of the import.
-- **Dataset Size**: 500,000 NDJSON transaction records (100 MB), with one deliberately malformed line every 500 records (1,000 rejections total).
-- **Database Batch Size**: 1,000 records per PostgreSQL transaction batch (`ON CONFLICT DO NOTHING`).
-- **Worker Concurrency**: 6 Node `worker_threads` (`WORKER_CONCURRENCY=6`), CPU risk scoring off the HTTP event loop.
-- **Machine Specifications**:
-  - CPU: 8 Cores (Apple Silicon arm64)
-  - System Memory: 8.00 GB RAM
-  - Operating System: macOS (Darwin arm64)
-  - Database: PostgreSQL 16 (Alpine Docker Container)
+The script generates the dataset, uploads it, polls `GET /v1/imports/:id` every 100ms until the
+import finishes, and samples `GET /metrics` on each poll. Throughput is measured end to end: the
+clock starts before the upload and stops when the import reports `completed`.
 
----
+Start from an empty database. Transaction ids are unique per provider, so re-running without
+truncating makes the second run collide with the first and report conflicts instead of accepts.
 
-## Performance Summary — 500,000 records
+## Machine
 
-| Metric | Measured Value | Notes |
-| :--- | :--- | :--- |
-| **Dataset Size** | 500,000 records (100 MB) | 499,000 accepted, 1,000 rejected |
-| **Total Duration** | 344.8 seconds | Upload + full asynchronous processing |
-| **Throughput** | **1,450 records/sec** | End-to-end, including upload |
-| **API Latency (P50)** | **6.85 ms** | 528 samples taken *during* processing |
-| **API Latency (P99)** | 179.87 ms | |
-| **API Latency (max)** | 4,052 ms | One outlier during the 100 MB upload — see below |
-| **Event-Loop Delay (P99)** | 87.8 ms | Peak over the whole run |
-| **Peak Resident Memory (RSS)** | 571 MB | Main thread + 6 worker heaps; peak occurs during upload |
-| **Peak Heap Usage** | 98.5 MB | Flat across the run — no accumulation |
-| **Database Batch Size** | 1,000 items/batch | 500 batches, all committed exactly once |
-| **Worker Concurrency** | 6 worker threads | All 6 busy simultaneously in 40% of samples |
-
-### Correctness check alongside the numbers
-
-A throughput figure means nothing if the data is wrong, so the same run was reconciled three ways:
-
-| Source | Accepted count |
+| | |
 | :--- | :--- |
-| `imports.accepted_count` (progress counter) | 499,000 |
-| `SUM(import_batches.inserted_count)` (ledger) | 499,000 |
-| `SELECT COUNT(*) FROM transactions` (actual rows) | 499,000 |
+| CPU | Apple M1, 8 cores (4 performance + 4 efficiency) |
+| Memory | 8 GB |
+| Node | v24.14.0 |
+| PostgreSQL | 16.13 |
+| Worker concurrency | 4 (default) |
+| Database batch size | 1,000 (default) |
 
-All 500 batches committed exactly once.
+## Results — 500,000 records
 
----
-
-## Detailed Analysis & Bottlenecks
-
-### 1. How API Responsiveness was Protected
-Throughout the run the API was polled once per second across four endpoints (528 samples). The median response was **6.85 ms** while 500,000 records were being scored and written, because risk scoring — the only genuinely expensive work — runs on worker threads rather than the request thread.
-
-The **4-second maximum** is honest and worth explaining rather than hiding: it occurs at the start, while the 100 MB multipart upload is being received and streamed to disk by the same process. That is I/O and stream plumbing on the main thread, not scoring. It affects the upload window only; once processing begins, latency settles back to single-digit milliseconds. Moving uploads behind a reverse proxy, or accepting them on a separate process, would remove it.
-
-### 2. Worker Pool Utilization
-Sampling `app_risk_workers{state="busy"}` once per second across 182 samples:
-
-| Workers busy | Samples |
+| Metric | Value |
 | :--- | :--- |
-| 6 (all) | 74 |
-| 1–5 | 29 |
-| 0 | 73 |
+| Dataset size | 500,000 records (~110 MB) |
+| Total duration | 450.3 s |
+| Throughput | 1,110 records/sec |
+| API latency P50 (during import) | 3.8 ms |
+| API latency P99 (during import) | 392 ms |
+| Peak RSS | 642 MB |
+| Peak heap used | 120 MB |
+| Event-loop delay P99 | 45.8 ms |
+| Event-loop utilization | 14.6 % |
+| Accepted / rejected / duplicates | 500,000 / 0 / 0 |
 
-Each batch is split into one chunk per worker so the whole pool works on it. Posting a batch to a single worker would cap throughput at one thread regardless of pool size.
+Correctness was checked against the database afterwards, not just the API response:
 
-Isolated pool measurement on an 8-core Apple M1 (2,000 records per batch, median of 3 runs), which is the basis for the `WORKER_CONCURRENCY` default of 4:
+| Source | Count |
+| :--- | :--- |
+| `imports.accepted_count` | 500,000 |
+| `SELECT count(*) FROM transactions` | 500,000 |
+| `SELECT count(*) FROM rejections` | 0 |
 
-| Pool size | Throughput | 500k records |
-| :--- | :--- | :--- |
-| 1 | 1,769 rec/s | ~283 s |
-| 2 | 2,354 rec/s | ~212 s |
-| 3 | 3,363 rec/s | ~149 s |
-| 4 (default) | 3,039 rec/s | ~165 s |
-| 6 | 2,984 rec/s | ~168 s |
-| 8 | 3,206 rec/s | ~156 s |
+## What the numbers mean
 
-The speedup is **~1.7×, not ~4×**, and it plateaus from three workers upward. Scoring is a tight SHA-256 loop, so it is bounded by the fast physical cores rather than the thread count: a batch completes only when its slowest chunk does, and on an M1 the extra chunks land on efficiency cores. Raising `WORKER_CONCURRENCY` past the plateau buys nothing and costs one V8 isolate per thread. The number is machine-specific — measure before changing it.
+**The API stays responsive.** Median latency was 3.8 ms while 500,000 records were being scored
+and written. This is the main thing the worker pool buys: scoring never runs on the request
+thread. The 392 ms P99 comes from the upload window at the start, when a ~110 MB multipart body
+is being received and streamed to disk by the same process.
 
-The `0` samples are not idleness — they are the database-write phase of the batch cycle, which is the limiting factor.
+**Memory is flat, not proportional to the file.** Peak heap was 120 MB for a 110 MB file, and it
+does not grow with file size — a separate test measured ~82 MB of heap for both a 72 MB and a
+216 MB file. Only one batch plus readline's buffer is ever live. Peak RSS is higher than heap
+because it includes four worker threads, each with its own V8 isolate.
 
-### 3. Memory Behavior
-Peak heap stayed at **98.5 MB** across a 100 MB file — resident memory does not track file size, confirming the file is genuinely streamed. Backpressure comes from `for await (const line of rl)`: the async iterator stops pulling while the loop body awaits scoring and the database write, so only one batch plus readline's internal buffer is ever live.
+**Throughput is dominated by the risk scorer, deliberately.** The scorer runs 500 SHA-256 rounds
+per record to simulate CPU-intensive work. Measured in isolation, one thread does ~1,700
+records/sec and the pool plateaus around ~3,000 records/sec from three workers upward. The
+end-to-end figure of 1,110 records/sec is lower because scoring and the database write happen in
+sequence per batch.
 
-Peak **RSS of 571 MB** is larger than heap because it includes six worker threads, each with its own V8 heap and isolate, plus the OS page cache for the upload. It is bounded and flat, not growing.
+## Bottleneck
 
-### 4. Identified Bottleneck & What to Improve Next
-- **Current bottleneck: the batch cycle is serial.** A batch is scored (all workers busy) and *then* written (all workers idle), and the two phases are roughly the same length. The single highest-value change is to **pipeline them** — score batch N+1 while batch N is being written — which should approach a 2× improvement without adding hardware.
-- **Second: the upload path.** Multer stages the upload to a temporary file and the use case then copies that stream into storage, so a 100 MB file is written to disk twice. Handing the multipart stream directly to `IFileStorage` removes one full copy and most of the latency outlier above.
-- **Third: `COPY` instead of multi-row `INSERT`.** For the accepted-transaction path, `COPY ... FROM STDIN` into a staging table followed by an `INSERT ... ON CONFLICT DO NOTHING` is substantially faster than parameterised multi-row inserts at this batch size.
-- **Then**: a Redis/Postgres-backed distributed queue for cross-process scaling, and connection-pool tuning driven by observed write queue depth.
+The batch cycle is serial: a batch is scored with all workers busy, then written with all workers
+idle. The two phases are roughly the same length, so about half the wall time has the pool doing
+nothing.
 
-### 5. Did it meet expectations?
-The requirement was to *design for* at least 500,000 records with bounded memory, bounded concurrency, batched writes, and a responsive API. All four hold: memory is flat, concurrency is bounded at every stage (queue, workers, batch size), every write is batched and committed exactly once, and median API latency stayed under 7 ms during the run.
+The clearest next improvement is to overlap them — score batch N+1 while batch N is being
+written. That should approach a 2x gain without adding hardware. It is not implemented because it
+complicates the backpressure and bounded-memory guarantees, which are currently simple to reason
+about and easy to demonstrate.
 
-Absolute throughput (1,450 rec/s) is modest, and deliberately so — the risk scorer performs 500 SHA-256 rounds per record to simulate CPU-intensive work, which is by far the dominant per-record cost. The meaningful result is not the number itself but that the CPU work scales across workers and stays off the request path.
+After that: hand the multipart stream straight to `IFileStorage` so a large upload is not written
+to disk twice, and use `COPY ... FROM STDIN` into a staging table instead of multi-row `INSERT`.
+
+## Did it meet expectations?
+
+Yes for the stated requirements. The target was to *design for* 500,000 records with bounded
+memory, bounded concurrency, batched writes, and a responsive API. All four hold: heap is flat,
+concurrency is bounded at the queue, the worker pool, and the batch size, every write is batched,
+and median API latency stayed under 4 ms throughout.
+
+Absolute throughput is modest and expected to be — the artificial CPU cost per record sets the
+ceiling. The meaningful result is that the cost is isolated from the request path, not the number
+itself.
